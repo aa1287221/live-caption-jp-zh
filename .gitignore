@@ -1,0 +1,21 @@
+# API 金鑰 —— 絕對不要進版控
+*_api_key.txt
+gemini_api_key.txt
+groq_api_key.txt
+openrouter_api_key.txt
+
+# 機器/個人狀態，不是原始碼
+last_settings.json
+
+# Python
+__pycache__/
+*.pyc
+
+# 打包好的執行檔、第三方工具（體積大、屬於建置產物，不放原始碼庫）
+*.exe
+
+# 執行期間產生的逐字稿、錄音、個人收聽紀錄
+transcripts/
+
+# 開發過程中的備份資料夾
+backup_*/

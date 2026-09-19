@@ -1,0 +1,16 @@
+# 先照 README.md 的指示單獨安裝有 CUDA 支援的 torch，再安裝以下套件
+# 翻譯改叫本機 Ollama 服務（另外安裝，見 README），不再需要 transformers/sentencepiece
+PyAudioWPatch
+faster-whisper
+silero-vad
+numpy
+
+# 內建擷取引擎用：選視窗、抓畫面、延遲播放、自動調整來源音量
+# （畫面擷取改用 PrintWindow，不再需要 windows-capture 這個套件）
+sounddevice
+pycaw
+pygetwindow
+pywin32
+Pillow
+opencv-python
+scipy
