@@ -1,4 +1,5 @@
 import io
+import http.client
 import json
 import os
 import socket
@@ -22,7 +23,14 @@ class FakeResponse:
 		return False
 
 	def read(self):
+		if isinstance(self._body, FakeReadFailure):
+			raise self._body.error
 		return self._body
+
+
+class FakeReadFailure:
+	def __init__(self, error):
+		self.error = error
 
 
 class FakeOpener:
@@ -168,6 +176,17 @@ class LocalChatClientContractTests(unittest.TestCase):
 				client.chat("system", "user")
 		sleep.assert_not_called()
 		self.assertEqual(len(opener.calls), 1)
+
+	def test_incomplete_http_response_is_a_connection_error_and_is_not_retried(self):
+		client, opener = self.make_client(
+			FakeReadFailure(http.client.IncompleteRead(b"SECRET_PARTIAL_BODY", 100)),
+		)
+
+		with self.assertRaisesRegex(LocalLLMError, "連線") as caught:
+			client.chat("SECRET_PROMPT", "user")
+		self.assertEqual(len(opener.calls), 1)
+		self.assertNotIn("SECRET_PARTIAL_BODY", str(caught.exception))
+		self.assertNotIn("SECRET_PROMPT", str(caught.exception))
 
 	def test_defaults_are_read_when_configuration_is_absent(self):
 		client, _ = self.make_client()

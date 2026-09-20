@@ -1,3 +1,4 @@
+import http.client
 import json
 import math
 import os
@@ -19,7 +20,12 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
 class LocalChatClient:
 	"""Call a local OpenAI-compatible chat-completions endpoint."""
 
-	def __init__(self, base_url=None, model=None, timeout=None):
+	def __init__(
+		self,
+		base_url: str | None = None,
+		model: str | None = None,
+		timeout: float | None = None,
+	) -> None:
 		configured_base_url = (
 			base_url if base_url is not None
 			else os.environ.get("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
@@ -78,7 +84,7 @@ class LocalChatClient:
 			raise LocalLLMError("本機模型逾時設定無效：請指定有限的正數秒數。")
 		return numeric
 
-	def chat(self, system_prompt, user_prompt):
+	def chat(self, system_prompt: str, user_prompt: str) -> str:
 		payload = {
 			"model": self.model,
 			"messages": [
@@ -102,7 +108,13 @@ class LocalChatClient:
 			raise LocalLLMError(
 				f"本機模型 HTTP {error.code} 錯誤：請確認 {request.full_url} 端點與服務狀態。"
 			) from error
-		except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as error:
+		except (
+			urllib.error.URLError,
+			http.client.HTTPException,
+			socket.timeout,
+			TimeoutError,
+			OSError,
+		) as error:
 			raise LocalLLMError(
 				f"本機模型連線失敗：請確認服務已啟動且可連線至 {request.full_url}。"
 			) from error
