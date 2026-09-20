@@ -1,7 +1,7 @@
 """
 live_caption_gemini.py
-跟 live_caption.py 完全一樣的內建擷取版，翻譯改呼叫本機語言模型的
-OpenAI 相容聊天端點。檔名保留 gemini 是為了相容既有捷徑與匯入路徑。
+跟 live_caption.py 完全一樣的內建擷取版，翻譯改呼叫 Ontime Riva
+本機翻譯服務。檔名保留 gemini 是為了相容既有捷徑與匯入路徑。
 
 使用情境：
   你是合法訂閱會員，在瀏覽器裡播放影片。這支程式只會擷取你電腦上「你自己選定的
@@ -15,9 +15,8 @@ OpenAI 相容聊天端點。檔名保留 gemini 是為了相容既有捷徑與�
 安裝（一次就好）：
     pip install -r requirements.txt
 
-    啟動支援 /v1/chat/completions 的本機 instruction 模型伺服器，並依 README
-    設定 LOCAL_LLM_BASE_URL、LOCAL_LLM_MODEL 與 LOCAL_LLM_TIMEOUT。不需要 Google
-    SDK 或 Gemini API 金鑰。
+    確認 /project/Ontime-Translator 已安裝 Riva 模型與 relay。程式會重用
+    已就緒的服務，或透過 WSL 自動啟動翻譯專用 relay。不需要 API 金鑰。
 
 執行：
     python live_caption_gemini.py
@@ -39,10 +38,9 @@ OpenAI 相容聊天端點。檔名保留 gemini 是為了相容既有捷徑與�
 
     如果有按過「開始錄製」，完整音訊會存成 transcript_YYYYMMDD_HHMMSS_audio.wav
     （播放期間暫存用），結束播放後自動用這份完整錄音重新辨識+翻譯一次（沒有
-    即時限制、看得到完整上下文，準確度比即時逐句處理時更好，內容忠實呈現、
-    不會自己刪減），產生 transcript_YYYYMMDD_HHMMSS_notebooklm_style.md——概念
-    上就是手動把錄音交給語言模型潤稿的流程，差別是全自動、
-    不用你自己動手。這步會多花幾分鐘，結束播放後稍等一下。整理完成後那份 WAV
+    即時限制），再把每句原始日文交給 Riva 翻譯，產生
+    transcript_YYYYMMDD_HHMMSS_notebooklm_style.md。檔名為了相容舊版本而保留；
+    內容是重新辨識的逐句雙語輸出，不會另做上下文校正或編輯潤飾。整理完成後那份 WAV
     錄音檔會自動刪除（本來就只是拿來重新辨識用，不是給人聽的，用完即刪）。
     沒按過「開始錄製」的話，這步會直接略過。
 
@@ -87,7 +85,7 @@ from PIL import Image, ImageTk
 
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
-from local_llm import LocalChatClient, LocalLLMError
+from ontime_riva import OntimeRivaClient, RivaError
 
 # ---------- 硬體自動偵測 (5800X3D + RTX 5060 Ti 會自動吃 GPU) ----------
 _CUDA_OK = torch.cuda.is_available()
@@ -104,8 +102,8 @@ WHISPER_DEVICE = "cuda" if _CUDA_OK else "cpu"
 WHISPER_COMPUTE_TYPE = "float16" if _CUDA_OK else "int8"
 WHISPER_BEAM_SIZE = 5             # 用 beam search 選最佳辨識結果，GPU 才有餘裕開這個
 
-# Translation uses an external local instruction-model server through its
-# OpenAI-compatible chat endpoint. Connection settings live in local_llm.py.
+# Translation uses the installed Ontime Riva relay. Connection and lifecycle
+# settings live in ontime_riva.py.
 
 TARGET_SR = 16000                 # Whisper / VAD / 延遲音訊緩衝區使用的取樣率
 VAD_CHUNK_SAMPLES = 512           # Silero VAD 在 16kHz 下要求的固定窗格大小 (32ms)
@@ -190,35 +188,6 @@ def load_glossary() -> dict:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"讀取 glossary.json 失敗，改用預設內容：{e}")
         return dict(_DEFAULT_GLOSSARY)
-
-
-def glossary_hint(glossary: dict) -> str:
-    """把專有名詞對照表變成給 LLM 看的提示詞。
-
-    用條列式格式（一行一個詞），比全部擠成一句用頓號隔開更容易讓模型每個都
-    注意到，詞多的時候（例如 20 幾個）尤其有差；LLM 不像傳統翻譯模型那樣需要
-    用佔位符「保護」專有名詞，但也不是 100% 保證會遵守，詞單一多還是可能漏。
-    """
-    if not glossary:
-        return ""
-    terms = sorted({t for t in glossary if t})
-    bullet_list = "\n".join(f"- {t}" for t in terms)
-    return (
-        "以下是專有名詞對照表（人名、節目名、團名等），這些詞不管出現在句子的哪個"
-        "位置，一律「完全保留原文」，絕對不要翻譯、意譯、或拆解成別的字：\n"
-        f"{bullet_list}"
-    )
-
-
-_REPEAT_RUN_RE = re.compile(r"(.{1,4}?)\1{4,}")
-
-
-def _collapse_repetition(text: str) -> str:
-    """保險絲：翻譯模型偶爾會卡進重複同一小段文字的退化迴圈，
-    這裡把「連續重複 5 次以上」的片段砍成只留 2 次，避免洗版整個字幕視窗。
-    正常語句裡的疊字（哈哈哈、等等等）通常不會連續重複到 5 次以上，不受影響。
-    """
-    return _REPEAT_RUN_RE.sub(lambda m: m.group(1) * 2, text)
 
 
 def resample_linear(x: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
@@ -335,119 +304,82 @@ def polish_transcript(raw_log_path: Path, paragraph_gap_sec: float = PARAGRAPH_G
     return out_path
 
 
-_POLISH_CHUNK_LINES = 60  # 事後整理時，每批送幾句給翻譯模型，避免單次回應太長
+_POLISH_CHUNK_LINES = 32  # Match the relay's maximum number of strings per request.
 
 
 def rebuild_transcript_from_full_audio(
-    wav_path: "Path",
-    asr_model: "WhisperModel",
-    translator: "Translator",
-    glossary: dict | None,
-    episode_title: str = "",
-) -> "Path | None":
-    """事後（沒有即時限制）用完整錄音重新整理一份逐字稿。
+	wav_path: Path,
+	asr_model: WhisperModel,
+	translator: "Translator",
+	glossary: dict[str, str] | None,
+	episode_title: str = "",
+) -> Path | None:
+	"""事後用完整錄音重新辨識，並產生逐句對齊的雙語逐字稿。"""
+	if not wav_path.exists():
+		return None
 
-    即時觀看時，Whisper 一次只看幾秒鐘的音訊、翻譯只看前一句當上下文；這裡因為
-    已經結束播放、不用趕時間，可以讓 Whisper 用內建 VAD 重新辨識整段錄音（前後
-    文連貫，準確度比逐句處理時更好），再把整批辨識結果交給翻譯模型潤過、統一
-    用詞——概念上就是手動把錄音交給語言模型潤稿的流程，
-    差別是全部自動跑完，不用你自己動手。
-    """
-    if not wav_path.exists():
-        return None
+	print("正在用完整錄音重新辨識（沒有即時限制，可能要等幾分鐘）...")
+	segments, _ = asr_model.transcribe(
+		str(wav_path),
+		language="ja",
+		vad_filter=True,   # 交給 Whisper 內建 VAD 處理整段音訊的斷句，不用自己切
+		beam_size=WHISPER_BEAM_SIZE,
+		initial_prompt="、".join(glossary.keys()) if glossary else None,
+		no_speech_threshold=0.6,
+		log_prob_threshold=-1.0,
+	)
 
-    print("正在用完整錄音重新辨識（沒有即時限制，準確度會比即時逐句辨識時更好，可能要等幾分鐘）...")
-    segments, _ = asr_model.transcribe(
-        str(wav_path),
-        language="ja",
-        vad_filter=True,   # 交給 Whisper 內建 VAD 處理整段音訊的斷句，不用自己切
-        beam_size=WHISPER_BEAM_SIZE,
-        initial_prompt="、".join(glossary.keys()) if glossary else None,
-        no_speech_threshold=0.6,
-        log_prob_threshold=-1.0,
-    )
+	ja_lines = []
+	for seg in segments:
+		text = seg.text.strip()
+		if not text or text in _HALLUCINATION_DENYLIST:
+			continue
+		ja_lines.append(text)
 
-    ja_lines = []
-    for seg in segments:
-        text = seg.text.strip()
-        if not text or text in _HALLUCINATION_DENYLIST:
-            continue
-        ja_lines.append(text)
+	if not ja_lines:
+		print("完整錄音重新辨識沒有偵測到內容，略過這份整理稿。")
+		return None
 
-    if not ja_lines:
-        print("完整錄音重新辨識沒有偵測到內容，略過這份整理稿。")
-        return None
+	print(f"重新辨識完成，共 {len(ja_lines)} 句，正在用 Riva 分批產生雙語逐字稿...")
 
-    print(f"重新辨識完成，共 {len(ja_lines)} 句，正在請翻譯模型分批整理成完整逐字稿...")
+	bilingual_parts = []
+	degraded_count = 0
+	total_batches = (len(ja_lines) + _POLISH_CHUNK_LINES - 1) // _POLISH_CHUNK_LINES
+	for batch_no, i in enumerate(range(0, len(ja_lines), _POLISH_CHUNK_LINES), start=1):
+		batch = ja_lines[i:i + _POLISH_CHUNK_LINES]
+		translations = translator.translate_batch(batch, glossary)
+		if len(translations) != len(batch):
+			translations = [f"（翻譯失敗，保留日文原文）{text}" for text in batch]
+		degraded_count += sum(text.startswith("（翻譯失敗，保留日文原文）") for text in translations)
+		bilingual_parts.extend(f"{ja}\n{zh}" for ja, zh in zip(batch, translations))
+		print(f"  已處理第 {batch_no}/{total_batches} 批")
 
-    system_prompt = (
-        "你是專業的日文-繁體中文口譯兼編輯。使用者會分批貼上同一集日文廣播/網路節目的"
-        "逐句語音辨識稿（可能有少數同音錯字，請憑上下文合理修正，不要另外編造內容）。"
-        "請針對這一批內容，把每一句翻成自然流暢、口語化的繁體中文，不要逐字直譯。\n"
-        "請忠實呈現內容，不要自己刪減或改寫語氣詞、口頭禪這類東西——錄音裡實際講了"
-        "什麼，就照樣翻出來，不要自己判斷哪些是「贅字」就省略掉。\n"
-        "輸出格式：每句先輸出修正過的日文原句，換行輸出對應的繁體中文翻譯，"
-        "句子之間空一行；只要輸出這些內容，不要加任何額外的說明、前言或標題。"
-    )
-    hint = glossary_hint(glossary) if glossary else ""
-    if hint:
-        system_prompt += "\n" + hint
+	if degraded_count:
+		print(f"警告：{degraded_count} 句翻譯失敗，雙語逐字稿已保留對應的日文原文。")
 
-    polished_parts = []
-    context_tail = ""
-    total_batches = (len(ja_lines) + _POLISH_CHUNK_LINES - 1) // _POLISH_CHUNK_LINES
-    for batch_no, i in enumerate(range(0, len(ja_lines), _POLISH_CHUNK_LINES), start=1):
-        batch = ja_lines[i:i + _POLISH_CHUNK_LINES]
-        user_prompt = (
-            (f"（前面幾句當上下文參考，不用重複翻譯：\n{context_tail}\n\n") if context_tail else ""
-        ) + "請處理這一批句子：\n" + "\n".join(batch)
+	out_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + "_notebooklm_style.md")
+	header = [
+		f"# {episode_title}" if episode_title else "# 中日對照逐字稿（事後重新辨識版）",
+		"",
+		f"整理時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+		"",
+		"這份逐字稿由完整錄音重新辨識，再將每句原始日文交給 Ontime Riva 翻譯。",
+		"Riva 不會參考前後句，也不會校正辨識結果或進行編輯潤飾。",
+		"",
+		"---",
+		"",
+	]
+	out_path.write_text("\n".join(header) + "\n\n".join(bilingual_parts) + "\n", encoding="utf-8")
 
-        # Offline reconstruction keeps caller-level retries because completion matters
-        # more than latency; the transport itself deliberately performs no retries.
-        result = ""
-        for attempt in range(3):
-            result = translator._chat(system_prompt, user_prompt)
-            if result:
-                break
-            print(f"  第 {batch_no} 批翻譯失敗，20 秒後重試（第 {attempt + 1} 次）...")
-            time.sleep(20)
+	# 逐字稿已經整理好了，完整錄音本來就只是拿來重新辨識用、不是給人聽的，
+	# 用完就刪掉，不用留著佔硬碟空間
+	try:
+		wav_path.unlink()
+		print(f"逐字稿已產生，完整錄音（{wav_path.name}）已刪除。")
+	except OSError as e:
+		print(f"整理完成，但刪除完整錄音時發生錯誤（不影響逐字稿內容）：{e}")
 
-        if result:
-            polished_parts.append(result)
-        context_tail = "\n".join(batch[-2:])
-        print(f"  已處理第 {batch_no}/{total_batches} 批")
-
-        if batch_no < total_batches:
-            # Preserve pacing between long offline requests.
-            time.sleep(4.5)
-
-    if not polished_parts:
-        print("翻譯模型沒有回傳任何內容，略過這份整理稿。")
-        return None
-
-    out_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + "_notebooklm_style.md")
-    header = [
-        f"# {episode_title}" if episode_title else "# 中日對照逐字稿（事後重新辨識版）",
-        "",
-        f"整理時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-        "這份逐字稿是結束播放後，用完整錄音重新辨識、翻譯模型看過完整上下文潤過的版本，"
-        "準確度會比即時觀看時看到的字幕更好，內容照實呈現、沒有自己刪減。",
-        "",
-        "---",
-        "",
-    ]
-    out_path.write_text("\n".join(header) + "\n\n".join(polished_parts) + "\n", encoding="utf-8")
-
-    # 逐字稿已經整理好了，完整錄音本來就只是拿來重新辨識用、不是給人聽的，
-    # 用完就刪掉，不用留著佔硬碟空間
-    try:
-        wav_path.unlink()
-        print(f"逐字稿已產生，完整錄音（{wav_path.name}）已刪除。")
-    except OSError as e:
-        print(f"整理完成，但刪除完整錄音時發生錯誤（不影響逐字稿內容）：{e}")
-
-    return out_path
+	return out_path
 
 
 def load_cue_file(cue_path: Path) -> dict | None:
@@ -945,8 +877,8 @@ class AudioCapture(threading.Thread):
     2. 同時把每一小段原始音訊寫進 AudioRingBuffer，供延遲播放用（不受 VAD 影響，
        靜音的部分也會寫進去，這樣延遲播放出來的聲音才會是連續、自然的）
     3. 如果手動按下「開始錄製」，同時把完整音訊寫成一個 WAV 檔存起來——結束播放
-       後可以拿這份完整錄音重新整段辨識+翻譯，準確度比即時逐句處理時更好（概念
-       上就是手動把錄音交給 NotebookLM 轉錄、再交給語言模型潤稿的流程，差別是自動）
+       後可以用它重新辨識整段音訊，再將每句原始日文交給 Riva 翻譯，
+       產生逐句對齊的雙語輸出。
     """
 
     def __init__(
@@ -1189,58 +1121,61 @@ class AudioCapture(threading.Thread):
                 self._wav_writer = None
 
 
-_SYSTEM_PROMPT_BASE = (
-    "你是專業的日文-繁體中文口譯，正在幫忙即時翻譯一個日文廣播/網路節目的口語對話。"
-    "內容常有語助詞、停頓、話講到一半重講、省略主詞這類真人講話的狀況，"
-    "請翻成自然通順、口語化的繁體中文，像是真人在說話，不要翻得死板生硬、也不要逐字直譯。"
-    "只要輸出翻譯結果本身，不要加任何說明、引號、備註、拼音或原文。"
-)
+_TRANSLATION_FAILURE_PREFIX = "（翻譯失敗，保留日文原文）"
+_RIVA_BATCH_SIZE = 32
 
 
 class Translator:
-	"""Use a local instruction model for Japanese-to-Traditional-Chinese translation."""
+	"""Translate Japanese through the installed Ontime Riva relay."""
 
-	def __init__(self):
-		self.client = LocalChatClient()
-		print(f"翻譯將使用本機模型：{self.client.model}（{self.client.base_url}）")
+	def __init__(self) -> None:
+		self.client = OntimeRivaClient()
+		self.client.ensure_ready()
+		print(f"翻譯將使用 Ontime Riva：{self.client.base_url}")
 
-	def _chat(self, system_prompt: str, user_prompt: str) -> str:
-		try:
-			return _collapse_repetition(self.client.chat(system_prompt, user_prompt).strip())
-		except LocalLLMError as exc:
-			print(f"本機模型翻譯失敗：{exc}")
-			return ""
-
-	def translate(self, text: str, glossary: dict | None = None) -> str:
-		"""翻整段文字（螢幕字幕列用，可能是好幾句接在一起）"""
+	def translate(self, text: str, glossary: dict[str, str] | None = None) -> str:
+		"""Translate one live caption without retrying or hiding its source on failure."""
 		if not text.strip():
 			return ""
-		system_prompt = _SYSTEM_PROMPT_BASE
-		hint = glossary_hint(glossary) if glossary else ""
-		if hint:
-			system_prompt += "\n" + hint
-		return self._chat(system_prompt, f"請翻譯：\n{text}")
+		try:
+			translated = self.client.translate(text, glossary).strip()
+			if not translated:
+				raise RivaError("Riva 未回傳有效譯文。")
+			return translated
+		except RivaError as exc:
+			print(f"Riva 翻譯失敗：{exc}")
+			return _TRANSLATION_FAILURE_PREFIX + text
 
-	def translate_with_context(self, prev_ja: str, current_ja: str, glossary: dict | None = None) -> str:
-		"""翻「這一句」，但先讓模型看過前一句當作上下文（代名詞/省略主詞會準很多）。
+	def translate_with_context(
+		self,
+		prev_ja: str,
+		current_ja: str,
+		glossary: dict[str, str] | None = None,
+	) -> str:
+		"""Compatibility wrapper; Riva translates only the current sentence."""
+		return self.translate(current_ja, glossary)
 
-		LLM 可以直接看懂「只翻最後一句、前面只是給你參考」這種指示，
-		不用像傳統翻譯模型那樣還要用文字切割去猜哪一段是「這一句」的翻譯。
-		"""
-		if not current_ja.strip():
-			return ""
-
-		system_prompt = _SYSTEM_PROMPT_BASE
-		hint = glossary_hint(glossary) if glossary else ""
-		if hint:
-			system_prompt += "\n" + hint
-
-		if prev_ja:
-			user_prompt = f"前一句話（僅供參考上下文，不用翻譯）：\n{prev_ja}\n\n請翻譯這一句：\n{current_ja}"
-		else:
-			user_prompt = f"請翻譯這一句：\n{current_ja}"
-
-		return self._chat(system_prompt, user_prompt)
+	def translate_batch(self, texts: list[str], glossary: dict[str, str] | None = None) -> list[str]:
+		"""Translate ordered chunks, retrying only transient offline failures."""
+		if not texts:
+			return []
+		results = []
+		for offset in range(0, len(texts), _RIVA_BATCH_SIZE):
+			chunk = texts[offset:offset + _RIVA_BATCH_SIZE]
+			for attempt in range(3):
+				try:
+					translated = self.client.translate_batch(chunk, glossary)
+					if len(translated) != len(chunk):
+						raise RivaError("Riva 回傳數量與原文不一致。")
+					results.extend(translated)
+					break
+				except RivaError as exc:
+					print(f"Riva 批次翻譯失敗：{exc}")
+					if not exc.retryable or attempt == 2:
+						results.extend(_TRANSLATION_FAILURE_PREFIX + text for text in chunk)
+						break
+					time.sleep(20)
+		return results
 
 
 class Worker(threading.Thread):
@@ -1262,11 +1197,11 @@ class Worker(threading.Thread):
         self.episode_title = episode_title
         self.pause_state = pause_state
 
+        self.translator = Translator()
         print("載入語音辨識模型（Whisper，第一次執行會自動下載）...")
         self.asr = WhisperModel(
             WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
         )
-        self.translator = Translator()
         self._stop = threading.Event()
 
         # 用來偵測 Whisper 卡進「幻覺迴圈」：音訊有雜音/glitch 時，有時候會連續
@@ -1275,7 +1210,8 @@ class Worker(threading.Thread):
         self._recent_ja_texts = deque(maxlen=4)
         self._hallucination_loop_warned = False
 
-        self.prev_ja = ""  # 只看前一句當上下文，用來讓翻譯知道代名詞/省略主詞指的是誰
+        # Kept for the compatibility method signature; Riva receives only current_ja.
+        self.prev_ja = ""
 
         self.glossary = load_glossary()
         # 把專有名詞清單當提示詞餵給 Whisper，幫助它正確拼出這些字，
@@ -1347,10 +1283,8 @@ class Worker(threading.Thread):
             # 視窗會直接顯示（不會反而更晚跳出）
             release_at = capture_time + DISPLAY_DELAY_SEC
 
-            # 看過前一句上下文，準確度比單句翻譯好，而且是逐句對齊的乾淨結果；
-            # 逐字稿面板、畫面下方字幕列都用同一份結果，不用多算一次
-            # （字幕列以前會把最近幾句接起來整段重翻，除了拖慢速度，塞太多字
-            # 也會把固定高度的字幕區撐爆，所以改成只顯示當下這一句就好）
+            # Riva receives only the current sentence. Both views reuse the same
+            # ordered result so the caption and transcript stay aligned.
             zh_final = self.translator.translate_with_context(self.prev_ja, ja_text, self.glossary)
             self.prev_ja = ja_text
             self.transcript_queue.put((release_at, ja_text, zh_final))
@@ -1663,7 +1597,7 @@ OUTPUT_DEFAULT_LABEL = "系統預設（可能會有回音問題）"
 def main():
     global DISPLAY_DELAY_SEC
 
-    print("=== 即時中日對照字幕（本機模型版） ===")
+    print("=== 即時中日對照字幕（Ontime Riva 版） ===")
 
     from tkinter import filedialog, messagebox
     from startup_gui import run_startup_dialog, load_last_settings, save_last_settings, index_of_name
@@ -1958,7 +1892,7 @@ def main():
                     print(f"用完整錄音重新整理逐字稿時發生錯誤（不影響前面已經產生的逐字稿）：{e}")
 
                 if notebooklm_style_path:
-                    print(f"已產生用完整錄音重新辨識、準確度更好的逐字稿：{notebooklm_style_path}")
+                    print(f"已產生用完整錄音重新辨識的雙語逐字稿：{notebooklm_style_path}")
 
 
 if __name__ == "__main__":

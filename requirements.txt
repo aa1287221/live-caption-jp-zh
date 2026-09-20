@@ -1,5 +1,5 @@
 # 先照 README.md 的指示單獨安裝有 CUDA 支援的 torch，再安裝以下套件
-# 翻譯改叫本機 Ollama 服務（另外安裝，見 README），不再需要 transformers/sentencepiece
+# 翻譯使用已安裝的 Ontime Riva relay（見 README），不需要 transformers/sentencepiece。
 PyAudioWPatch
 faster-whisper
 silero-vad
