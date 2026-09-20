@@ -174,12 +174,14 @@ class LocalTranslationIntegrationTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as temp_dir:
 			wav_path = Path(temp_dir) / "retry_audio.wav"
 			wav_path.write_bytes(b"audio")
-			with mock.patch.object(self.app.time, "sleep") as sleep:
+			with mock.patch.object(self.app.time, "sleep") as sleep, \
+				 mock.patch.object(Path, "unlink") as unlink:
 				self.assertIsNotNone(self.app.rebuild_transcript_from_full_audio(
 					wav_path, asr, translator, None
 				))
 			self.assertEqual(translator.client.chat.call_count, 2)
 			sleep.assert_called_once_with(20)
+			unlink.assert_called_once_with()
 
 			failed_path = Path(temp_dir) / "failed_audio.wav"
 			failed_path.write_bytes(b"audio")
