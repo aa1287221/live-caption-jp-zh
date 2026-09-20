@@ -17,8 +17,8 @@ transcribe_audio_file.py
       <音檔檔名>_transcript.md    給你自己看的可讀逐字稿（帶時間戳記）
 
 音檔格式：mp3/wav/m4a 等 ffmpeg 支援的格式都可以（faster-whisper 內部靠
-ffmpeg 讀取）。金鑰讀取、模型設定都沿用 live_caption_gemini.py 的設定，
-執行前一樣要有 gemini_api_key.txt 或 GEMINI_API_KEY 環境變數。
+ffmpeg 讀取）。本機語言模型連線設定沿用 live_caption_gemini.py；不需要
+Google SDK 或 Gemini API 金鑰。
 """
 
 import argparse
@@ -117,14 +117,14 @@ def transcribe_audio_file(audio_path: Path, episode_title: str = ""):
             (f"（前面幾句當上下文參考，不用重複翻譯：\n{context_tail}\n\n") if context_tail else ""
         ) + f"請翻譯這一批句子（共 {len(batch)} 句）：\n{numbered}"
 
-        # 這是離線批次工作，不趕時間，撞到額度限制的話等久一點重試，
-        # 把它做完比做快更重要
+        # This offline batch keeps its caller-level retries because completion matters
+        # more than latency; the transport itself deliberately performs no retries.
         result = ""
         for attempt in range(3):
             result = translator._chat(system_prompt, user_prompt)
             if result:
                 break
-            print(f"  第 {batch_no} 批翻譯失敗（可能撞到額度限制），20 秒後重試（第 {attempt + 1} 次）...")
+            print(f"  第 {batch_no} 批翻譯失敗，20 秒後重試（第 {attempt + 1} 次）...")
             time.sleep(20)
 
         translations = _parse_numbered_translations(result, len(batch)) if result else [""] * len(batch)
@@ -134,7 +134,7 @@ def transcribe_audio_file(audio_path: Path, episode_title: str = ""):
         context_tail = "\n".join(c["ja"] for c in batch[-2:])
         print(f"  已翻譯第 {batch_no}/{total_batches} 批")
         if batch_no < total_batches:
-            time.sleep(4.5)  # 主動放慢節奏，盡量不要撞到免費額度的每分鐘請求數上限
+            time.sleep(4.5)  # Preserve pacing between long offline requests.
 
     cues_path = audio_path.with_name(audio_path.stem + "_cues.json")
     cues_path.write_text(

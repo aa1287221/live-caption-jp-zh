@@ -1,7 +1,7 @@
 """
 live_caption_gemini.py
-跟 live_caption.py 完全一樣的內建擷取版，唯一差別：翻譯改呼叫 Gemini API
-（gemini-2.5-flash-lite）取代本機 Ollama，拿來測試雲端翻譯品質好不好用。
+跟 live_caption.py 完全一樣的內建擷取版，翻譯改呼叫本機語言模型的
+OpenAI 相容聊天端點。檔名保留 gemini 是為了相容既有捷徑與匯入路徑。
 
 使用情境：
   你是合法訂閱會員，在瀏覽器裡播放影片。這支程式只會擷取你電腦上「你自己選定的
@@ -14,20 +14,10 @@ live_caption_gemini.py
 
 安裝（一次就好）：
     pip install -r requirements.txt
-    pip install google-genai
 
-    需要自己去 Google AI Studio（https://aistudio.google.com/apikey）申請一組
-    免費的 Gemini API 金鑰，然後在終端機設定成環境變數再執行（金鑰不要寫進程式
-    碼裡，也不要貼給任何人）：
-
-        PowerShell（只在這次視窗有效）：
-            $env:GEMINI_API_KEY = "你的金鑰"
-
-        想每次開新視窗都自動生效，改用「系統管理」設定成永久的使用者環境變數，
-        或是每次執行前都重新設定一次也可以。
-
-    免費額度大約：gemini-2.5-flash-lite 每天 1,000 次、每分鐘 15 次請求，
-    大概夠一天看一集左右的節目份量，實際額度以 Google 官方頁面當下顯示為準。
+    啟動支援 /v1/chat/completions 的本機 instruction 模型伺服器，並依 README
+    設定 LOCAL_LLM_BASE_URL、LOCAL_LLM_MODEL 與 LOCAL_LLM_TIMEOUT。不需要 Google
+    SDK 或 Gemini API 金鑰。
 
 執行：
     python live_caption_gemini.py
@@ -51,7 +41,7 @@ live_caption_gemini.py
     （播放期間暫存用），結束播放後自動用這份完整錄音重新辨識+翻譯一次（沒有
     即時限制、看得到完整上下文，準確度比即時逐句處理時更好，內容忠實呈現、
     不會自己刪減），產生 transcript_YYYYMMDD_HHMMSS_notebooklm_style.md——概念
-    上就是手動把錄音丟 NotebookLM 轉錄、再丟 Gemini 潤稿那個流程，差別是全自動、
+    上就是手動把錄音交給語言模型潤稿的流程，差別是全自動、
     不用你自己動手。這步會多花幾分鐘，結束播放後稍等一下。整理完成後那份 WAV
     錄音檔會自動刪除（本來就只是拿來重新辨識用，不是給人聽的，用完即刪）。
     沒按過「開始錄製」的話，這步會直接略過。
@@ -97,9 +87,7 @@ from PIL import Image, ImageTk
 
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
-from google import genai
-from google.genai import types as genai_types
-from google.genai import errors as genai_errors
+from local_llm import LocalChatClient, LocalLLMError
 
 # ---------- 硬體自動偵測 (5800X3D + RTX 5060 Ti 會自動吃 GPU) ----------
 _CUDA_OK = torch.cuda.is_available()
@@ -116,13 +104,8 @@ WHISPER_DEVICE = "cuda" if _CUDA_OK else "cpu"
 WHISPER_COMPUTE_TYPE = "float16" if _CUDA_OK else "int8"
 WHISPER_BEAM_SIZE = 5             # 用 beam search 選最佳辨識結果，GPU 才有餘裕開這個
 
-# 翻譯改呼叫雲端的 Gemini API，取代本機 Ollama + Qwen2.5：
-# 雲端大型模型的語言理解能力明顯更好，翻起來更自然、更少怪異的字句，
-# 代價是需要申請 API 金鑰、有免費額度限制、逐字稿內容會傳到 Google 的伺服器。
-# 金鑰優先讀環境變數 GEMINI_API_KEY；沒有的話改讀 gemini_api_key.txt 這個本機檔案
-# （給雙擊 exe 這種沒有終端機可以先設環境變數的用法）。兩種都不寫死在程式碼裡。
-GEMINI_MODEL = "gemini-3.5-flash-lite"
-GEMINI_API_KEY_FILE = Path(__file__).parent / "gemini_api_key.txt"
+# Translation uses an external local instruction-model server through its
+# OpenAI-compatible chat endpoint. Connection settings live in local_llm.py.
 
 TARGET_SR = 16000                 # Whisper / VAD / 延遲音訊緩衝區使用的取樣率
 VAD_CHUNK_SAMPLES = 512           # Silero VAD 在 16kHz 下要求的固定窗格大小 (32ms)
@@ -367,7 +350,7 @@ def rebuild_transcript_from_full_audio(
     即時觀看時，Whisper 一次只看幾秒鐘的音訊、翻譯只看前一句當上下文；這裡因為
     已經結束播放、不用趕時間，可以讓 Whisper 用內建 VAD 重新辨識整段錄音（前後
     文連貫，準確度比逐句處理時更好），再把整批辨識結果交給翻譯模型潤過、統一
-    用詞——概念上就是手動把錄音丟 NotebookLM 轉錄、再丟 Gemini 潤稿的那個流程，
+    用詞——概念上就是手動把錄音交給語言模型潤稿的流程，
     差別是全部自動跑完，不用你自己動手。
     """
     if not wav_path.exists():
@@ -419,15 +402,14 @@ def rebuild_transcript_from_full_audio(
             (f"（前面幾句當上下文參考，不用重複翻譯：\n{context_tail}\n\n") if context_tail else ""
         ) + "請處理這一批句子：\n" + "\n".join(batch)
 
-        # 這裡跟即時字幕不一樣：這是背景整理工作，不趕時間，撞到免費額度限制
-        # 的話等久一點重試，把它做完比做快更重要——所以不用 translator._chat
-        # 那個「立刻放棄」的快速失敗邏輯，這裡自己重試
+        # Offline reconstruction keeps caller-level retries because completion matters
+        # more than latency; the transport itself deliberately performs no retries.
         result = ""
         for attempt in range(3):
             result = translator._chat(system_prompt, user_prompt)
             if result:
                 break
-            print(f"  第 {batch_no} 批翻譯失敗（可能撞到額度限制），20 秒後重試（第 {attempt + 1} 次）...")
+            print(f"  第 {batch_no} 批翻譯失敗，20 秒後重試（第 {attempt + 1} 次）...")
             time.sleep(20)
 
         if result:
@@ -436,7 +418,7 @@ def rebuild_transcript_from_full_audio(
         print(f"  已處理第 {batch_no}/{total_batches} 批")
 
         if batch_no < total_batches:
-            # 主動放慢節奏，盡量不要撞到免費額度的「每分鐘請求數」上限
+            # Preserve pacing between long offline requests.
             time.sleep(4.5)
 
     if not polished_parts:
@@ -1216,115 +1198,49 @@ _SYSTEM_PROMPT_BASE = (
 
 
 class Translator:
-    """呼叫 Gemini API 做翻譯，取代本機 Ollama + Qwen2.5。
+	"""Use a local instruction model for Japanese-to-Traditional-Chinese translation."""
 
-    雲端大型模型的語言理解能力比塞得進消費級顯卡的本機模型好上一截，翻起來
-    更自然、更少怪異的字句；代價是要申請 API 金鑰、有免費額度限制（撞到額度
-    會自動重試幾次）、逐字稿內容會傳到 Google 的伺服器，這是雲端服務本來就
-    會有的取捨。
-    """
+	def __init__(self):
+		self.client = LocalChatClient()
+		print(f"翻譯將使用本機模型：{self.client.model}（{self.client.base_url}）")
 
-    def __init__(self):
-        api_key = self._load_api_key()
-        if not api_key:
-            raise RuntimeError(
-                "找不到 Gemini API 金鑰。可以用任一種方式提供：\n"
-                "  1. 打開 gemini_api_key.txt，把你的金鑰貼進去存檔（雙擊 exe 這種\n"
-                "     不會另外設環境變數的用法，就是靠這個檔案）\n"
-                "  2. 或在終端機執行：$env:GEMINI_API_KEY = \"你的金鑰\"\n"
-                "金鑰去 https://aistudio.google.com/apikey 免費申請。"
-            )
-        self.client = genai.Client(api_key=api_key)
-        print(f"翻譯將呼叫 Gemini API：{GEMINI_MODEL}")
+	def _chat(self, system_prompt: str, user_prompt: str) -> str:
+		try:
+			return _collapse_repetition(self.client.chat(system_prompt, user_prompt).strip())
+		except LocalLLMError as exc:
+			print(f"本機模型翻譯失敗：{exc}")
+			return ""
 
-    @staticmethod
-    def _load_api_key() -> str | None:
-        # 先看環境變數（給想手動控制的人用），沒有的話改讀本機這個檔案——
-        # 雙擊 exe 啟動沒有終端機可以先設環境變數，靠這個檔案才能一鍵直接用。
-        # 這個檔案只會留在你自己的電腦，不會被讀到、上傳、或經過我們的對話紀錄，
-        # 只是提醒你：這個檔案跟資料夾如果要分享/備份到別的地方，記得先拿掉金鑰。
-        env_key = os.environ.get("GEMINI_API_KEY")
-        if env_key:
-            return env_key.strip()
+	def translate(self, text: str, glossary: dict | None = None) -> str:
+		"""翻整段文字（螢幕字幕列用，可能是好幾句接在一起）"""
+		if not text.strip():
+			return ""
+		system_prompt = _SYSTEM_PROMPT_BASE
+		hint = glossary_hint(glossary) if glossary else ""
+		if hint:
+			system_prompt += "\n" + hint
+		return self._chat(system_prompt, f"請翻譯：\n{text}")
 
-        if GEMINI_API_KEY_FILE.exists():
-            content = GEMINI_API_KEY_FILE.read_text(encoding="utf-8").strip()
-            # 過濾掉檔案裡的說明文字（用 # 開頭的行），只留真正像金鑰的那行
-            lines = [ln.strip() for ln in content.splitlines() if ln.strip() and not ln.strip().startswith("#")]
-            if lines:
-                return lines[0]
-        return None
+	def translate_with_context(self, prev_ja: str, current_ja: str, glossary: dict | None = None) -> str:
+		"""翻「這一句」，但先讓模型看過前一句當作上下文（代名詞/省略主詞會準很多）。
 
-    def _chat(self, system_prompt: str, user_prompt: str) -> str:
-        # 這裡故意不做「撞到額度限制就睡幾秒重試」這件事——Worker 是單一執行緒
-        # 依序處理每一句話，這裡卡多久，後面所有排隊中的字幕就跟著晚多久出現，
-        # 睡眠等待幾秒鐘乘上好幾次重試，很容易就吃光延遲緩衝爭取來的時間，變成
-        # 字幕塞車、過一陣子才一次噴出一大串（接 OpenRouter 時踩過這個坑）。
-        # 遇到額度限制直接跳過這一句就好，下一句照常繼續嘗試，不會被卡住。
-        try:
-            response = self.client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_prompt,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.3,
-                ),
-            )
-            result = (response.text or "").strip()
-            return _collapse_repetition(result)
-        except Exception as e:
-            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
-            if is_rate_limit:
-                print("Gemini API 撞到免費額度限制，這句先跳過，下一句會繼續嘗試。")
-                return ""
+		LLM 可以直接看懂「只翻最後一句、前面只是給你參考」這種指示，
+		不用像傳統翻譯模型那樣還要用文字切割去猜哪一段是「這一句」的翻譯。
+		"""
+		if not current_ja.strip():
+			return ""
 
-            print(f"呼叫 Gemini API 翻譯失敗：{e}")
-            if "404" in str(e) or "NOT_FOUND" in str(e):
-                # Google 常常改型號名稱/下架舊型號，型號名稱錯的話直接列出
-                # 這把金鑰目前實際能用的型號，不用回來猜、也不用等我查
-                self._print_available_models()
-            return ""
+		system_prompt = _SYSTEM_PROMPT_BASE
+		hint = glossary_hint(glossary) if glossary else ""
+		if hint:
+			system_prompt += "\n" + hint
 
-    def _print_available_models(self):
-        try:
-            print("目前這把金鑰實際可用的型號（把 GEMINI_MODEL 換成其中一個試試看）：")
-            for m in self.client.models.list():
-                name = getattr(m, "name", str(m))
-                if "flash" in name.lower() or "lite" in name.lower():
-                    print(f"  {name}")
-        except Exception as list_err:
-            print(f"（列出可用型號也失敗了：{list_err}）")
+		if prev_ja:
+			user_prompt = f"前一句話（僅供參考上下文，不用翻譯）：\n{prev_ja}\n\n請翻譯這一句：\n{current_ja}"
+		else:
+			user_prompt = f"請翻譯這一句：\n{current_ja}"
 
-    def translate(self, text: str, glossary: dict | None = None) -> str:
-        """翻整段文字（螢幕字幕列用，可能是好幾句接在一起）"""
-        if not text.strip():
-            return ""
-        system_prompt = _SYSTEM_PROMPT_BASE
-        hint = glossary_hint(glossary) if glossary else ""
-        if hint:
-            system_prompt += "\n" + hint
-        return self._chat(system_prompt, f"請翻譯：\n{text}")
-
-    def translate_with_context(self, prev_ja: str, current_ja: str, glossary: dict | None = None) -> str:
-        """翻「這一句」，但先讓模型看過前一句當作上下文（代名詞/省略主詞會準很多）。
-
-        LLM 可以直接看懂「只翻最後一句、前面只是給你參考」這種指示，
-        不用像傳統翻譯模型那樣還要用文字切割去猜哪一段是「這一句」的翻譯。
-        """
-        if not current_ja.strip():
-            return ""
-
-        system_prompt = _SYSTEM_PROMPT_BASE
-        hint = glossary_hint(glossary) if glossary else ""
-        if hint:
-            system_prompt += "\n" + hint
-
-        if prev_ja:
-            user_prompt = f"前一句話（僅供參考上下文，不用翻譯）：\n{prev_ja}\n\n請翻譯這一句：\n{current_ja}"
-        else:
-            user_prompt = f"請翻譯這一句：\n{current_ja}"
-
-        return self._chat(system_prompt, user_prompt)
+		return self._chat(system_prompt, user_prompt)
 
 
 class Worker(threading.Thread):
@@ -1747,7 +1663,7 @@ OUTPUT_DEFAULT_LABEL = "系統預設（可能會有回音問題）"
 def main():
     global DISPLAY_DELAY_SEC
 
-    print("=== 即時中日對照字幕（Gemini API 版） ===")
+    print("=== 即時中日對照字幕（本機模型版） ===")
 
     from tkinter import filedialog, messagebox
     from startup_gui import run_startup_dialog, load_last_settings, save_last_settings, index_of_name

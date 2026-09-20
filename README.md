@@ -59,6 +59,46 @@ Ollama 有在背景跑著（開始選單搜尋 Ollama 開一次，或終端機�
 pip install -r requirements.txt
 ```
 
+### 本機聊天模型替代版（相容檔名 `live_caption_gemini.py`）
+
+`live_caption_gemini.py` 與 `transcribe_audio_file.py` 現在使用外部本機服務的
+OpenAI 相容 `POST /v1/chat/completions` 端點。這項變更不影響前述
+`live_caption.py` 等既有 Ollama 版本；檔名中的 `gemini` 僅為了相容既有捷徑與
+Python 匯入路徑。此版本不需要 Gemini API 金鑰或 Google SDK。
+
+請先自行準備適合日中翻譯、能遵循一般指令的聊天模型，以及提供上述端點的服務。
+程式不會自動挑選或下載模型。若使用 `llama-server`，已確認可用的基本旗標如下；
+模型路徑、context 大小與 GPU layers 應依你的模型及硬體調整：
+
+```powershell
+llama-server -m C:\path\to\model.gguf -c 8192 -ngl 99 -a local-model --host 127.0.0.1 --port 8080 --jinja
+```
+
+其中 `-m/--model` 指定模型、`-c/--ctx-size` 設定 context、
+`-ngl/--gpu-layers` 控制 GPU layers、`-a/--alias` 設定 API 模型名稱；另有
+`--host`、`--port` 與 `--jinja`。環境變數中的模型名稱必須與伺服器載入的模型或
+alias 完全一致：
+
+```powershell
+$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:8080/v1"
+$env:LOCAL_LLM_MODEL = "local-model"
+$env:LOCAL_LLM_TIMEOUT = "30"
+python live_caption_gemini.py
+python transcribe_audio_file.py recording.wav --title "節目名稱"
+```
+
+連線網址是從執行程式的 **Windows Python process** 觀看的位址；若服務在容器、
+WSL 或另一台電腦，`127.0.0.1` 未必指向該服務，請改用 Windows 可連線的網址。
+Whisper 與語言模型可能同時占用 VRAM，若顯存不足，請調低其中一方的 GPU 使用量。
+第一次載入或大型模型回應較慢時，可提高 `LOCAL_LLM_TIMEOUT`。離線翻譯一次會處理
+40 句，完整錄音重建一次會處理 60 句並附帶前文，因此伺服器必須提供足夠的
+context 與輸出長度；不要為了塞入模型而靜默捨棄原文或上下文。
+
+Ontime Riva 的 `/v1/translate` 不是這裡設定的端點。它只接受翻譯欄位，無法完整
+承接本工具的 system prompt、前句上下文、專有名詞提示、編號對齊與雙語編輯指令；
+若目前只有 Riva translation 服務，仍需另行啟動相容的 instruction chat server。
+本機模型的翻譯品質與速度會依模型而異，連線成功不代表語言品質與雲端模型相同。
+
 ## 執行
 
 雙擊桌面捷徑「即時中日字幕」，或手動執行：

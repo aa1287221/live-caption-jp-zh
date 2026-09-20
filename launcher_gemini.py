@@ -1,6 +1,6 @@
 """
 launcher_gemini.py
-一鍵啟動器：雙擊後在同一個資料夾裡執行 live_caption_gemini.py（Gemini API 版）。
+一鍵啟動器：雙擊後在同一個資料夾裡執行 live_caption_gemini.py（本機模型版）。
 打包成 exe 後放在跟 live_caption_gemini.py 同一層資料夾即可使用。
 """
 
@@ -20,7 +20,7 @@ def main():
     base_dir = get_base_dir()
     target = os.path.join(base_dir, "live_caption_gemini.py")
 
-    print("=== 即時中日對照字幕（Gemini API 版）啟動器 ===")
+    print("=== 即時中日對照字幕（本機模型版）啟動器 ===")
     print(f"程式資料夾：{base_dir}\n")
 
     if not os.path.exists(target):
