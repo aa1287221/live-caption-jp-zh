@@ -113,6 +113,27 @@ class RivaHttpTests(unittest.TestCase):
 		self.assertEqual(result, "".join("譯：" + part for part in RelayHandler.requests[0]["text"]))
 		self.assertTrue(all(len(part) <= 1200 for part in RelayHandler.requests[0]["text"]))
 
+	def test_long_input_rejects_an_empty_segment_before_reassembly(self):
+		RelayHandler.responder = lambda payload: (
+			200,
+			{"translations": [accepted(""), accepted("譯文")]},
+		)
+		with self.assertRaisesRegex(RivaError, "未回傳有效譯文"):
+			self.client.translate("あ" * 1201)
+
+	def test_response_requires_guard_object(self):
+		for ontime in (
+			{"verdict": "ok", "reasons": []},
+			{"verdict": "ok", "reasons": [], "guard": []},
+		):
+			with self.subTest(ontime=ontime):
+				RelayHandler.responder = lambda payload, ontime=ontime: (
+					200,
+					{"translations": [{"text": "譯文", "ontime": ontime}]},
+				)
+				with self.assertRaisesRegex(RivaError, "判定資訊無效"):
+					self.client.translate("文")
+
 	def test_glossary_masks_longest_first_and_preserves_multiplicity(self):
 		result = self.client.translate("東京都と東京、東京", {"東京都": "東京都", "東京": "東京"})
 		self.assertEqual(result, "譯：東京都と東京、東京")
@@ -122,12 +143,15 @@ class RivaHttpTests(unittest.TestCase):
 	def test_glossary_marker_collision_and_integrity_failures(self):
 		literal = "__GLOSSARY_0__ と東京"
 		self.assertEqual(self.client.translate(literal, {"東京": "Tokyo"}), "譯：__GLOSSARY_0__ とTokyo")
-		for changed in ("", "__GLOSSARY_999__ __GLOSSARY_999__"):
+		for changed, message in (
+			("", "未回傳有效譯文"),
+			("__GLOSSARY_999__ __GLOSSARY_999__", "術語"),
+		):
 			with self.subTest(changed=changed):
 				RelayHandler.responder = lambda payload, changed=changed: (
 					200, {"translations": [accepted(changed)]},
 				)
-				with self.assertRaisesRegex(RivaError, "術語"):
+				with self.assertRaisesRegex(RivaError, message):
 					self.client.translate("東京", {"東京": "Tokyo"})
 
 	def test_skipped_punctuation_preserves_source_and_restore_is_one_pass(self):

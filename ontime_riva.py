@@ -25,7 +25,7 @@ _SENTENCE_END = re.compile(r"(?<=[。！？!?\n])")
 
 
 class RivaError(RuntimeError):
-	def __init__(self, message: str, *, retryable: bool = False):
+	def __init__(self, message: str, *, retryable: bool = False) -> None:
 		super().__init__(message)
 		self.retryable = retryable
 
@@ -36,7 +36,7 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
 
 
 class OntimeRivaClient:
-	def __init__(self, base_url: str | None = None, timeout: float | None = None):
+	def __init__(self, base_url: str | None = None, timeout: float | None = None) -> None:
 		self.base_url = self._validate_origin(
 			base_url if base_url is not None else os.environ.get("ONTIME_RELAY_URL", "http://127.0.0.1:8765")
 		)
@@ -89,10 +89,10 @@ class OntimeRivaClient:
 			raise RivaError("ONTIME_REPO_PATH 設定無效：請使用 WSL 的絕對 POSIX 路徑。")
 		return value.rstrip("/") or "/"
 
-	def translate(self, text: str, glossary: dict | None = None) -> str:
+	def translate(self, text: str, glossary: dict[str, str] | None = None) -> str:
 		return self.translate_batch([text], glossary)[0]
 
-	def translate_batch(self, texts: list[str], glossary: dict | None = None) -> list[str]:
+	def translate_batch(self, texts: list[str], glossary: dict[str, str] | None = None) -> list[str]:
 		if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
 			raise RivaError("翻譯輸入格式無效：必須是字串清單。")
 		glossary_map = self._validate_glossary(glossary)
@@ -226,8 +226,8 @@ class OntimeRivaClient:
 			if not isinstance(item, dict) or not isinstance(item.get("ontime"), dict):
 				raise RivaError(f"Riva 第 {display_index} 句回應格式無效。")
 			meta = item["ontime"]
-			verdict, reasons = meta.get("verdict"), meta.get("reasons")
-			if verdict not in ("ok", "warn", "reject", "skipped") or not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
+			verdict, reasons, guard = meta.get("verdict"), meta.get("reasons"), meta.get("guard")
+			if verdict not in ("ok", "warn", "reject", "skipped") or not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons) or not isinstance(guard, dict):
 				raise RivaError(f"Riva 第 {display_index} 句判定資訊無效。")
 			if verdict == "reject" or "input:truncated" in reasons:
 				raise RivaError(f"第 {display_index} 句被拒絕或截斷：{reasons}")
@@ -238,6 +238,8 @@ class OntimeRivaClient:
 				if texts[index].strip() and any(char.isalnum() for char in texts[index]):
 					raise RivaError(f"Riva 第 {display_index} 句略過實質內容。")
 				output = texts[index]
+			if texts[index].strip() and not output:
+				raise RivaError(f"Riva 第 {display_index} 句未回傳有效譯文。")
 			if verdict == "warn":
 				LOGGER.warning("Riva 第 %d 句警告：%s", display_index, reasons)
 			outputs.append(output)
