@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -108,15 +109,53 @@ class RivaHttpTests(unittest.TestCase):
 				self.assertEqual(len(RelayHandler.requests), before + 1)
 
 	def test_long_input_splits_without_losing_order(self):
-		text = "あ" * 700 + "。" + "い" * 700
+		text = "あ" * 130 + "。" + "い" * 130
 		result = self.client.translate(text)
-		self.assertEqual(result, "".join("譯：" + part for part in RelayHandler.requests[0]["text"]))
-		self.assertTrue(all(len(part) <= 1200 for part in RelayHandler.requests[0]["text"]))
+		segments = [part for request in RelayHandler.requests for part in request["text"]]
+		self.assertEqual("".join(segments), text)
+		self.assertEqual(result, "".join("譯：" + part for part in segments))
+		self.assertTrue(all(len(part) <= 120 for part in segments))
+
+	def test_long_input_prefers_sentence_boundaries(self):
+		text = "あ" * 80 + "。" + "い" * 80 + "。"
+		self.client.translate(text)
+		self.assertEqual(RelayHandler.requests[0]["text"], ["あ" * 80 + "。", "い" * 80 + "。"])
+
+	def test_long_input_keeps_glossary_markers_atomic(self):
+		text = "あ" * 110 + "東京" + "い" * 20
+		self.client.translate(text, {"東京": "東京"})
+		segments = RelayHandler.requests[0]["text"]
+		self.assertEqual(segments, ["あ" * 110, "__GLOSSARY_0__" + "い" * 20])
+		self.assertTrue(all(len(part) <= 120 for part in segments))
+
+	def test_each_segment_rejects_swapped_glossary_marker_ids(self):
+		swaps = {"__GLOSSARY_0__": "__GLOSSARY_1__", "__GLOSSARY_1__": "__GLOSSARY_0__"}
+		RelayHandler.responder = lambda payload: (
+			200,
+			{"translations": [accepted(re.sub(
+				r"__GLOSSARY_[01]__",
+				lambda match: swaps[match.group(0)],
+				part,
+			)) for part in payload["text"]]},
+		)
+		text = "あ" * 105 + "東京。" + "い" * 105 + "大阪"
+		with self.assertRaisesRegex(RivaError, "術語標記完整性失敗"):
+			self.client.translate(text, {"東京": "Tokyo", "大阪": "Osaka"})
+		self.assertEqual(len(RelayHandler.requests), 1)
+		self.assertEqual(len(RelayHandler.requests[0]["text"]), 2)
+
+	def test_segments_still_batch_at_32_requests(self):
+		text = "あ" * (120 * 33)
+		result = self.client.translate(text)
+		segments = [part for request in RelayHandler.requests for part in request["text"]]
+		self.assertEqual([len(request["text"]) for request in RelayHandler.requests], [32, 1])
+		self.assertEqual("".join(segments), text)
+		self.assertEqual(result, "".join("譯：" + part for part in segments))
 
 	def test_long_input_rejects_an_empty_segment_before_reassembly(self):
 		RelayHandler.responder = lambda payload: (
 			200,
-			{"translations": [accepted(""), accepted("譯文")]},
+			{"translations": [accepted("")] + [accepted("譯文") for _ in payload["text"][1:]]},
 		)
 		with self.assertRaisesRegex(RivaError, "未回傳有效譯文"):
 			self.client.translate("あ" * 1201)
@@ -153,6 +192,42 @@ class RivaHttpTests(unittest.TestCase):
 				)
 				with self.assertRaisesRegex(RivaError, message):
 					self.client.translate("東京", {"東京": "Tokyo"})
+
+	def test_adjacent_forged_markers_cannot_satisfy_integrity_by_substring(self):
+		RelayHandler.responder = lambda payload: (
+			200,
+			{"translations": [accepted("__GLOSSARY_1__GLOSSARY_0__GLOSSARY_2__")]},
+		)
+		with self.assertRaisesRegex(RivaError, "術語標記完整性失敗"):
+			self.client.translate("東京大阪京都", {"東京": "東京", "大阪": "大阪", "京都": "京都"})
+
+	def test_very_long_literal_marker_uses_a_short_atomic_escape(self):
+		literal = "__GLOSSARY_" + "9" * 5000 + "__"
+		text = "前" + literal + "後"
+		RelayHandler.responder = lambda payload: (
+			200,
+			{"translations": [accepted(part) for part in payload["text"]]},
+		)
+		self.assertEqual(self.client.translate(text), text)
+		segments = [part for request in RelayHandler.requests for part in request["text"]]
+		self.assertTrue(all(len(part) <= 120 for part in segments))
+		self.assertNotIn(literal, "".join(segments))
+		self.assertEqual("".join(segments).count("__GLOSSARY_0__"), 1)
+
+	def test_literal_marker_is_not_recursively_matched_by_glossary_terms(self):
+		literal = "__GLOSSARY_" + "8" * 5000 + "__"
+		text = "前" + literal + "中" + literal + "後"
+		RelayHandler.responder = lambda payload: (
+			200,
+			{"translations": [accepted(part) for part in payload["text"]]},
+		)
+		self.assertEqual(self.client.translate(text, {"GLOSSARY": "詞彙", "__": "雙底線"}), text)
+		segments = [part for request in RelayHandler.requests for part in request["text"]]
+		short_markers = re.findall(r"__GLOSSARY_\d+__", "".join(segments))
+		self.assertEqual(short_markers, ["__GLOSSARY_0__", "__GLOSSARY_1__"])
+		self.assertEqual(len(short_markers), len(set(short_markers)))
+		self.assertTrue(all(len(part) <= 120 for part in segments))
+		self.assertTrue(all(sum(marker in part for part in segments) == 1 for marker in short_markers))
 
 	def test_skipped_punctuation_preserves_source_and_restore_is_one_pass(self):
 		RelayHandler.responder = lambda payload: (200, {"translations": [{

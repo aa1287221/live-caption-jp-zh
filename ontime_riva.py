@@ -15,13 +15,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
 _MAX_ITEMS = 32
-_MAX_CHARS = 1200
+# Riva has a fixed 256-token output budget, and the relay omits the llama stop reason.
+# Stay well below the relay's 1200-character input limit to reduce silent truncation risk.
+_SAFE_SEGMENT_CHARS = 120
 _SENTENCE_END = re.compile(r"(?<=[。！？!?\n])")
+_GLOSSARY_MARKER = re.compile(r"__GLOSSARY_\d+__")
 
 
 class RivaError(RuntimeError):
@@ -112,7 +116,9 @@ class OntimeRivaClient:
 				[segment for _, segment in group],
 				[original_index for original_index, _ in group],
 			)
-			for (original_index, _), output in zip(group, translated):
+			for (original_index, segment), output in zip(group, translated):
+				if Counter(_GLOSSARY_MARKER.findall(segment)) != Counter(_GLOSSARY_MARKER.findall(output)):
+					raise RivaError(f"術語標記完整性失敗：第 {original_index + 1} 句的分段標記不符。")
 				states[original_index][1].append(output)
 		for original_index, (markers, pieces) in states.items():
 			combined = "".join(pieces)
@@ -123,7 +129,7 @@ class OntimeRivaClient:
 		return results
 
 	@staticmethod
-	def _validate_glossary(glossary):
+	def _validate_glossary(glossary: dict[str, str] | None) -> dict[str, str]:
 		if glossary is None:
 			return {}
 		if not isinstance(glossary, dict) or any(
@@ -134,55 +140,60 @@ class OntimeRivaClient:
 		return glossary
 
 	@staticmethod
-	def _mask(text, glossary):
-		literal_markers = re.findall(r"__GLOSSARY_\d+__", text)
-		if not glossary and not literal_markers:
+	def _mask(text: str, glossary: dict[str, str]) -> tuple[str, dict[str, str]]:
+		occupied: set[str] = set(_GLOSSARY_MARKER.findall(text))
+		if not glossary and not occupied:
 			return text, {}
-		existing_numbers = [int(value) for value in re.findall(r"__GLOSSARY_(\d+)__", text)]
-		start = max(existing_numbers, default=-1) + 1
-		markers = {}
-		counter = start
-		for literal in literal_markers:
-			marker = f"__GLOSSARY_{counter}__"
-			counter += 1
-			text = text.replace(literal, marker, 1)
-			markers[marker] = literal
-		if not glossary:
-			return text, markers
-		pattern = re.compile("|".join(re.escape(term) for term in sorted(glossary, key=len, reverse=True)))
-		def replace(match):
+		markers: dict[str, str] = {}
+		allocated: set[str] = set()
+		counter = 0
+
+		def allocate_marker() -> str:
 			nonlocal counter
-			marker = f"__GLOSSARY_{counter}__"
-			while marker in text or marker in markers:
-				counter += 1
+			while True:
 				marker = f"__GLOSSARY_{counter}__"
-			markers[marker] = glossary[match.group(0)]
-			counter += 1
+				counter += 1
+				if marker not in occupied and marker not in allocated:
+					allocated.add(marker)
+					return marker
+
+		branches = [f"(?P<literal>{_GLOSSARY_MARKER.pattern})"]
+		if glossary:
+			terms = "|".join(re.escape(term) for term in sorted(glossary, key=len, reverse=True))
+			branches.append(f"(?P<term>{terms})")
+		pattern = re.compile("|".join(branches))
+
+		def replace(match: re.Match[str]) -> str:
+			marker = allocate_marker()
+			matched = match.group(0)
+			markers[marker] = matched if match.lastgroup == "literal" else glossary[matched]
 			return marker
+
 		return pattern.sub(replace, text), markers
 
 	@staticmethod
-	def _split(text):
-		if len(text) <= _MAX_CHARS:
+	def _split(text: str) -> list[str]:
+		if len(text) <= _SAFE_SEGMENT_CHARS:
 			return [text]
 		units = [unit for unit in _SENTENCE_END.split(text) if unit]
 		pieces = []
 		current = ""
 		for unit in units:
-			while len(unit) > _MAX_CHARS:
+			while len(unit) > _SAFE_SEGMENT_CHARS:
 				if current:
 					pieces.append(current)
 					current = ""
-				cut = _MAX_CHARS
-				# A marker is short and atomic; move the boundary before it when necessary.
-				open_marker = unit.rfind("__GLOSSARY_", 0, cut)
-				if open_marker >= 0 and unit.find("__", open_marker + 11) >= cut:
-					cut = open_marker
+				cut = _SAFE_SEGMENT_CHARS
+				# Move a hard boundary before any marker it would otherwise bisect.
+				for marker in _GLOSSARY_MARKER.finditer(unit):
+					if marker.start() < cut < marker.end():
+						cut = marker.start()
+						break
 				if cut <= 0:
-					cut = _MAX_CHARS
+					cut = _SAFE_SEGMENT_CHARS
 				pieces.append(unit[:cut])
 				unit = unit[cut:]
-			if len(current) + len(unit) > _MAX_CHARS:
+			if len(current) + len(unit) > _SAFE_SEGMENT_CHARS:
 				pieces.append(current)
 				current = unit
 			else:
@@ -191,16 +202,14 @@ class OntimeRivaClient:
 			pieces.append(current)
 		return pieces
 
-	def _restore(self, text, markers):
-		for marker in re.findall(r"__GLOSSARY_\d+__", text):
-			if marker not in markers:
-				raise RivaError(f"術語標記完整性失敗：出現非預期標記 {marker}。")
-		for marker, target in markers.items():
-			if text.count(marker) != 1:
-				raise RivaError(f"術語標記完整性失敗：{marker} 數量不符。")
-		return re.sub(r"__GLOSSARY_\d+__", lambda match: markers[match.group(0)], text)
+	def _restore(self, text: str, markers: dict[str, str]) -> str:
+		actual = Counter(_GLOSSARY_MARKER.findall(text))
+		expected = Counter(markers.keys())
+		if actual != expected:
+			raise RivaError("術語標記完整性失敗：實際標記與預期不符。")
+		return _GLOSSARY_MARKER.sub(lambda match: markers[match.group(0)], text)
 
-	def _request(self, texts, original_indices):
+	def _request(self, texts: list[str], original_indices: list[int]) -> list[str]:
 		endpoint = self.base_url + "/v1/translate"
 		payload = {"text": texts, "source_lang": "JA", "target_lang": "zh-TW"}
 		request = urllib.request.Request(endpoint, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
