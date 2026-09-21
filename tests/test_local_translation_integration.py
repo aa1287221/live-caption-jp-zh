@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -63,6 +64,39 @@ class LocalTranslationIntegrationTests(unittest.TestCase):
 			translator = self.app.Translator()
 		return translator, client_class
 
+	def main_startup_mocks(self, stack, *, cue_mode=False):
+		"""Keep the real main() control flow while replacing platform boundaries."""
+		device = {"name": "CABLE Output", "defaultSampleRate": 48000}
+		window = types.SimpleNamespace(title="來源視窗", visible=True, width=800, height=600, _hWnd=7)
+		probe = mock.Mock()
+		probe.get_loopback_device_info_generator.return_value = [device]
+		settings = types.ModuleType("startup_gui")
+		settings.load_last_settings = mock.Mock(return_value={})
+		settings.save_last_settings = mock.Mock()
+		settings.index_of_name = mock.Mock(return_value=0)
+		settings.run_startup_dialog = mock.Mock(return_value={
+			"window_index": 0, "input_index": 1, "output_index": 0,
+			"episode_title": "測試", "delay": 2.0,
+		})
+		windows = types.ModuleType("pygetwindow")
+		windows.getAllWindows = mock.Mock(return_value=[window])
+		process = types.ModuleType("win32process")
+		process.GetWindowThreadProcessId = mock.Mock(return_value=(1, 42))
+		psutil = types.ModuleType("psutil")
+		psutil.Process = mock.Mock(return_value=types.SimpleNamespace(name=lambda: "browser.exe"))
+		stack.enter_context(mock.patch.dict(sys.modules, {
+			"startup_gui": settings, "pygetwindow": windows,
+			"win32process": process, "psutil": psutil,
+		}))
+		stack.enter_context(mock.patch.object(self.app.tk, "Tk"))
+		stack.enter_context(mock.patch("tkinter.messagebox.askyesno", return_value=cue_mode))
+		stack.enter_context(mock.patch.object(self.app.pyaudio, "PyAudio", return_value=probe, create=True))
+		stack.enter_context(mock.patch.object(self.app.sd, "query_hostapis", return_value=[], create=True))
+		stack.enter_context(mock.patch.object(self.app.sd, "query_devices", return_value=[], create=True))
+		stack.enter_context(mock.patch.object(self.app, "SOUND_VOLUME_VIEW_PATH", mock.Mock(exists=lambda: True)))
+		stack.enter_context(mock.patch.object(self.app, "get_app_output_device", return_value="喇叭"))
+		return stack.enter_context(mock.patch.object(self.app, "set_app_output_device", return_value=True))
+
 	def test_constructor_checks_readiness_once_and_context_sends_only_current_sentence(self):
 		translator, client_class = self.make_translator()
 		translator.client.translate.return_value = "  請多指教。  "
@@ -97,6 +131,65 @@ class LocalTranslationIntegrationTests(unittest.TestCase):
 
 		self.assertEqual(events, ["translator_ready", "whisper_loaded"])
 		self.assertIs(worker.translator, translator)
+
+	def test_worker_reuses_injected_translator_without_second_readiness_check(self):
+		translator = mock.Mock()
+		with tempfile.TemporaryDirectory() as temp_dir, \
+			 mock.patch.object(self.app, "Translator") as translator_class, \
+			 mock.patch.object(self.app, "WhisperModel"), \
+			 mock.patch.object(self.app, "load_glossary", return_value={}), \
+			 mock.patch.object(self.app, "TRANSCRIPT_DIR", Path(temp_dir)):
+			worker = self.app.Worker(
+				queue.Queue(), queue.Queue(), queue.Queue(), translator=translator
+			)
+
+		self.assertIs(worker.translator, translator)
+		translator_class.assert_not_called()
+
+	def test_main_riva_failure_cannot_reroute_source_audio(self):
+		with ExitStack() as stack:
+			reroute = self.main_startup_mocks(stack)
+			stack.enter_context(mock.patch.object(self.app, "Translator", side_effect=RivaError("未就緒")))
+			for name in ("FrameBuffer", "AudioRingBuffer", "PauseState", "ScreenCapture", "AudioCapture"):
+				stack.enter_context(mock.patch.object(self.app, name))
+			with self.assertRaisesRegex(RivaError, "未就緒"):
+				self.app.main()
+
+		reroute.assert_not_called()
+
+	def test_main_preflight_translator_is_reused_after_audio_reroute(self):
+		events = []
+		translator = mock.Mock()
+		with ExitStack() as stack:
+			reroute = self.main_startup_mocks(stack)
+			reroute.side_effect = lambda *_args: events.append("rerouted") or True
+			stack.enter_context(mock.patch.object(
+				self.app, "Translator", side_effect=lambda: events.append("ready") or translator
+			))
+			for name in ("FrameBuffer", "AudioRingBuffer", "PauseState", "ScreenCapture", "AudioCapture"):
+				stack.enter_context(mock.patch.object(self.app, name))
+			worker = stack.enter_context(mock.patch.object(self.app, "Worker"))
+			worker.side_effect = lambda *_args, **_kwargs: events.append("worker") or mock.Mock()
+			stack.enter_context(mock.patch.object(self.app, "DelayedAudioPlayer", side_effect=RuntimeError("stop")))
+			with self.assertRaisesRegex(RuntimeError, "stop"):
+				self.app.main()
+
+		self.assertEqual(events, ["ready", "rerouted", "worker"])
+		self.assertIs(worker.call_args.kwargs["translator"], translator)
+
+	def test_main_cue_mode_does_not_preflight_translator(self):
+		with ExitStack() as stack:
+			self.main_startup_mocks(stack, cue_mode=True)
+			stack.enter_context(mock.patch("tkinter.filedialog.askopenfilename", return_value="cues.json"))
+			stack.enter_context(mock.patch.object(
+				self.app, "load_cue_file", return_value={"cues": [{"start": 0, "ja": "日文", "zh": "中文"}]}
+			))
+			translator_class = stack.enter_context(mock.patch.object(self.app, "Translator"))
+			stack.enter_context(mock.patch.object(self.app, "FrameBuffer", side_effect=RuntimeError("stop")))
+			with self.assertRaisesRegex(RuntimeError, "stop"):
+				self.app.main()
+
+		translator_class.assert_not_called()
 
 	def test_empty_inputs_make_no_translation_calls(self):
 		translator, _ = self.make_translator()

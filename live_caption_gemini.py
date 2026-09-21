@@ -1189,6 +1189,7 @@ class Worker(threading.Thread):
         episode_title: str = "",
         date_str: str | None = None,
         pause_state: "PauseState | None" = None,
+        translator: "Translator | None" = None,
     ):
         super().__init__(daemon=True)
         self.utterance_queue = utterance_queue
@@ -1197,7 +1198,7 @@ class Worker(threading.Thread):
         self.episode_title = episode_title
         self.pause_state = pause_state
 
-        self.translator = Translator()
+        self.translator = translator if translator is not None else Translator()
         print("載入語音辨識模型（Whisper，第一次執行會自動下載）...")
         self.asr = WhisperModel(
             WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
@@ -1716,6 +1717,9 @@ def main():
         "output_device": output_names[dialog["output_index"]] if dialog["output_index"] == 0 else output_candidates[dialog["output_index"] - 1][1],
     })
 
+    # Complete Riva startup before changing the source application's audio route.
+    translator = Translator() if cue_data is None else None
+
     using_virtual_cable = bool(input_device and "CABLE" in input_device["name"].upper())
     original_output_device = None
     source_process_name = None
@@ -1791,7 +1795,7 @@ def main():
         )
         worker = Worker(
             utterance_queue, caption_queue, transcript_queue, episode_title,
-            date_str=date_str, pause_state=pause_state,
+            date_str=date_str, pause_state=pause_state, translator=translator,
         )
 
     # 延遲聲音一定要從「不是被擷取來源」的裝置播出來，不然會變成回音疊加的無限循環
