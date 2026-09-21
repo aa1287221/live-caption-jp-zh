@@ -123,7 +123,7 @@ class OntimeRivaClient:
 		for original_index, (markers, pieces) in states.items():
 			combined = "".join(pieces)
 			restored = self._restore(combined, markers)
-			if texts[original_index].strip() and not restored:
+			if texts[original_index].strip() and not restored.strip():
 				raise RivaError(f"Riva 第 {original_index + 1} 句未回傳有效譯文。")
 			results[original_index] = restored
 		return results
@@ -247,7 +247,7 @@ class OntimeRivaClient:
 				if texts[index].strip() and any(char.isalnum() for char in texts[index]):
 					raise RivaError(f"Riva 第 {display_index} 句略過實質內容。")
 				output = texts[index]
-			if texts[index].strip() and not output:
+			if texts[index].strip() and not output.strip():
 				raise RivaError(f"Riva 第 {display_index} 句未回傳有效譯文。")
 			if verdict == "warn":
 				LOGGER.warning("Riva 第 %d 句警告：%s", display_index, reasons)
@@ -324,7 +324,9 @@ class OntimeRivaClient:
 			body = json.loads(raw.decode("utf-8"))
 		except (UnicodeDecodeError, json.JSONDecodeError):
 			return "malformed"
-		nmt = body.get("nmt") if isinstance(body, dict) else None
+		if not isinstance(body, dict):
+			return "malformed"
+		nmt = body.get("nmt")
 		if body.get("service") != "ontime-translator-relay" or not isinstance(nmt, dict) or not isinstance(nmt.get("loaded"), bool) or not isinstance(nmt.get("state"), str) or "error" not in nmt:
 			return "malformed"
 		if nmt["loaded"] is True and nmt["state"] == "ready" and not nmt["error"]:

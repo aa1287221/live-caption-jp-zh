@@ -21,7 +21,9 @@ class RelayHandler(BaseHTTPRequestHandler):
 		pass
 
 	def do_GET(self):
-		body = type(self).health_body or {"service": "ontime-translator-relay", "nmt": {"loaded": True, "state": "ready", "error": None}}
+		body = type(self).health_body
+		if body is None:
+			body = {"service": "ontime-translator-relay", "nmt": {"loaded": True, "state": "ready", "error": None}}
 		self._reply(200, body)
 
 	def do_POST(self):
@@ -92,6 +94,17 @@ class RivaHttpTests(unittest.TestCase):
 				with self.assertRaises(RivaError) as caught:
 					self.client.translate("文")
 				self.assertFalse(caught.exception.retryable)
+
+	def test_ok_whitespace_translation_is_rejected_for_substantive_input(self):
+		RelayHandler.responder = lambda payload: (200, {"translations": [accepted("   ")]})
+		with self.assertRaisesRegex(RivaError, "未回傳有效譯文") as caught:
+			self.client.translate_batch(["日本語"])
+		self.assertFalse(caught.exception.retryable)
+
+	def test_reassembled_whitespace_translation_is_rejected(self):
+		with mock.patch.object(self.client, "_request", return_value=[" \t "]):
+			with self.assertRaisesRegex(RivaError, "未回傳有效譯文"):
+				self.client.translate_batch(["日本語"])
 
 	def test_warning_is_accepted_and_http_status_retryability_is_classified(self):
 		RelayHandler.responder = lambda payload: (200, {"translations": [{
@@ -244,6 +257,16 @@ class RivaHttpTests(unittest.TestCase):
 		self.assertEqual(self.client._probe_health(), "malformed")
 		RelayHandler.health_body = {"service": "ontime-translator-relay", "nmt": {"loaded": True, "state": "ready", "error": None}}
 		self.assertEqual(self.client._probe_health(), "ready")
+
+	def test_non_object_health_is_malformed_and_never_starts_relay(self):
+		for body in ([], ["ready"], "ready", 42):
+			with self.subTest(body=body):
+				RelayHandler.health_body = body
+				self.assertEqual(self.client._probe_health(), "malformed")
+				with mock.patch("ontime_riva.subprocess.Popen") as popen:
+					with self.assertRaisesRegex(RivaError, "健康檢查"):
+						self.client.ensure_ready()
+				popen.assert_not_called()
 
 
 class RivaLifecycleTests(unittest.TestCase):
