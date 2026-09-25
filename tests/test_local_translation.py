@@ -175,6 +175,19 @@ class LiveTranslationTests(unittest.TestCase):
 		self.assertEqual(engine.translate_live("SYS", "USER", "よろしく。", None, "FALLBACK"), "請多指教。")
 		self.assertEqual([call["user"] for call in client.calls], ["USER", "FALLBACK"])
 
+	def test_reply_that_retranslates_the_context_sentence_is_repaired(self):
+		replies = iter(["我是田中。", "我是田中。請多指教。", "請多指教。"])
+		engine, client, _, _ = make_engine(lambda s, u, n: next(replies))
+		self.assertEqual(engine.translate_live("SYS", "USER1", "田中です。", None, "FALLBACK1"), "我是田中。")
+		self.assertEqual(engine.translate_live("SYS", "USER2", "よろしく。", None, "FALLBACK2"), "請多指教。")
+		self.assertEqual([call["user"] for call in client.calls], ["USER1", "USER2", "FALLBACK2"])
+
+	def test_repeated_sentence_is_not_mistaken_for_context_leak(self):
+		engine, client, _, _ = make_engine(lambda s, u, n: "謝謝大家。")
+		for _ in range(2):
+			self.assertEqual(engine.translate_live("SYS", "USER", "ありがとう。", None, "FALLBACK"), "謝謝大家。")
+		self.assertEqual(len(client.calls), 2)
+
 	def test_unreachable_server_is_not_retried_during_live_captions(self):
 		engine, client, clock, _ = make_engine(lambda s, u, n: connection_error())
 		self.assertEqual(engine.translate_live("SYS", "USER", "よろしく。", None, "FALLBACK"), "")

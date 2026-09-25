@@ -272,6 +272,7 @@ class LocalTranslationEngine:
 		self.sleep = sleep
 		self.log = log
 		self.last_error: LocalLLMError | None = None
+		self._last_live_output = ""
 		self._live_failures = 0
 		self._live_paused_until = 0.0
 		self._batch_failures = 0
@@ -353,19 +354,31 @@ class LocalTranslationEngine:
 			self._live_succeeded()
 			return text if translation_problem(text, source, glossary) is None else ""
 		first = self.live_chat(system_prompt, user_prompt)
-		problem = translation_problem(first, source, glossary)
+		problem = translation_problem(first, source, glossary) or self._context_leak(first)
 		if problem is None:
-			return first
+			return self._remember(first)
 		if not first and (self.last_error is None or self.last_error.unreachable):
 			# The server is slow or gone; a second request would only delay later captions.
 			return ""
 		if fallback_user_prompt is None:
-			return first if problem not in ("echo", "marker") else ""
+			return self._remember(first) if problem not in ("echo", "marker") else ""
 		second = self.live_chat(system_prompt, fallback_user_prompt)
 		if translation_problem(second, source, glossary) is None:
-			return second
+			return self._remember(second)
 		# Prefer a non-empty first reply over a blank caption unless it echoed the prompt.
-		return first if first and problem not in ("echo", "marker") else ""
+		return self._remember(first) if first and problem not in ("echo", "marker") else ""
+
+	def _context_leak(self, text: str) -> str | None:
+		"""Detect a reply that re-translated the context sentence in front of the current one."""
+		previous = self._last_live_output
+		if len(previous) >= 4 and previous in text and len(text) > len(previous) + 1:
+			return "context"
+		return None
+
+	def _remember(self, text: str) -> str:
+		if text:
+			self._last_live_output = text
+		return text
 
 	def _live_failed(self, error: LocalLLMError) -> None:
 		self.last_error = error
