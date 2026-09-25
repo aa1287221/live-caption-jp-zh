@@ -121,9 +121,14 @@ genai_errors = None
 def _import_gemini_sdk():
 	global genai, genai_types, genai_errors
 	if genai is None:
-		from google import genai as sdk
-		from google.genai import types as sdk_types
-		from google.genai import errors as sdk_errors
+		try:
+			from google import genai as sdk
+			from google.genai import types as sdk_types
+			from google.genai import errors as sdk_errors
+		except ImportError as error:
+			raise RuntimeError(
+				"找不到 google-genai 套件：請執行 pip install google-genai，或在啟動畫面改選本機語言模型。"
+			) from error
 		genai, genai_types, genai_errors = sdk, sdk_types, sdk_errors
 
 # ---------- 硬體自動偵測 (5800X3D + RTX 5060 Ti 會自動吃 GPU) ----------

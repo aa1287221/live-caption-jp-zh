@@ -206,6 +206,11 @@ class GeminiPathTests(TranslationBackendTestCase):
 		self.assertEqual(self.sleeps, [])
 		self.assertIn("免費額度", self.printed_text())
 
+	def test_missing_gemini_sdk_explains_how_to_fix_it(self):
+		with mock.patch.dict(sys.modules, {"google": None, "google.genai": None}):
+			with self.assertRaisesRegex(RuntimeError, "pip install google-genai"):
+				self.app.Translator("gemini")
+
 	def test_missing_gemini_key_still_fails_clearly(self):
 		install_fake_gemini(lambda contents, n: "")
 		os.environ.pop("GEMINI_API_KEY")
