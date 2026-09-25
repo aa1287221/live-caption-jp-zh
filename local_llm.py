@@ -25,7 +25,12 @@ class LocalLLMClient:
 	DEFAULT_MAX_TOKENS = 256
 	STOP_STRINGS = ["</s>", "<s>"]
 
-	def __init__(self, base_url=None, timeout=None, max_tokens=None):
+	def __init__(
+		self,
+		base_url: str | None = None,
+		timeout: float | str | None = None,
+		max_tokens: int | str | None = None,
+	) -> None:
 		base_url = base_url if base_url is not None else os.environ.get("LOCAL_LLM_BASE_URL", self.DEFAULT_BASE_URL)
 		timeout = timeout if timeout is not None else os.environ.get("LOCAL_LLM_TIMEOUT", str(self.DEFAULT_TIMEOUT))
 		max_tokens = max_tokens if max_tokens is not None else os.environ.get("LOCAL_LLM_MAX_TOKENS", str(self.DEFAULT_MAX_TOKENS))
@@ -35,7 +40,7 @@ class LocalLLMClient:
 		self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RejectRedirects())
 
 	@staticmethod
-	def _validate_base_url(value):
+	def _validate_base_url(value: object) -> str:
 		if not isinstance(value, str):
 			raise LocalLLMError("本機模型網址設定無效：請使用 HTTP(S) 網址。")
 		try:
@@ -48,7 +53,7 @@ class LocalLLMClient:
 		return value.rstrip("/")
 
 	@staticmethod
-	def _validate_timeout(value):
+	def _validate_timeout(value: object) -> float:
 		if isinstance(value, bool):
 			raise LocalLLMError("本機模型逾時設定無效：請指定正數秒數。")
 		try:
@@ -60,7 +65,7 @@ class LocalLLMClient:
 		return numeric
 
 	@staticmethod
-	def _validate_max_tokens(value):
+	def _validate_max_tokens(value: object) -> int:
 		try:
 			if isinstance(value, bool):
 				raise ValueError
@@ -73,7 +78,7 @@ class LocalLLMClient:
 			raise LocalLLMError("本機模型輸出上限設定無效：請指定正整數。")
 		return numeric
 
-	def complete(self, prompt):
+	def complete(self, prompt: str) -> str:
 		if not isinstance(prompt, str):
 			raise LocalLLMError("本機模型提示內容無效：請提供文字。")
 		payload = {
@@ -108,10 +113,10 @@ class LocalLLMClient:
 		return content.strip()
 
 	@staticmethod
-	def _shape_error(endpoint):
+	def _shape_error(endpoint: str) -> LocalLLMError:
 		return LocalLLMError(f"本機模型回應格式無效：請確認 {endpoint} 提供 completion 回應。")
 
-	def chat(self, system_prompt, user_prompt):
+	def chat(self, system_prompt: str, user_prompt: str) -> str:
 		if not isinstance(system_prompt, str) or not isinstance(user_prompt, str):
 			raise LocalLLMError("本機模型提示內容無效：請提供文字。")
 		prompt = "<s>System\n" + system_prompt + "</s>\n<s>User\n" + user_prompt + "</s>\n<s>Assistant\n"
