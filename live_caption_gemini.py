@@ -1162,7 +1162,7 @@ class Translator:
 		"""Translate one live caption without retrying or hiding its source on failure."""
 		if not text.strip():
 			return ""
-		translated = self._chat(self._system_prompt(glossary), self._translation_prompt(text))
+		translated = self._translate_once(text, glossary)
 		if translated:
 			return translated
 		print(f"本機模型翻譯失敗，保留原文：{text}")
@@ -1192,9 +1192,21 @@ class Translator:
 		results = []
 		for offset in range(0, len(texts), _LOCAL_BATCH_SIZE):
 			chunk = texts[offset:offset + _LOCAL_BATCH_SIZE]
-			# Completion responses are single strings, so translate each item to keep
+			# Completion responses are single strings, so retry each item while keeping
 			# the caller's ordered one-to-one mapping without fragile response parsing.
-			results.extend(self.translate(text, glossary) for text in chunk)
+			for item_no, text in enumerate(chunk, start=1):
+				translated = ""
+				for attempt in range(3):
+					translated = self._translate_once(text, glossary)
+					if translated:
+						break
+					if attempt < 2:
+						print(
+							f"第 {offset // _LOCAL_BATCH_SIZE + 1} 批第 {item_no} 句翻譯失敗，"
+							f"20 秒後重試（第 {attempt + 1} 次）..."
+						)
+						time.sleep(20)
+				results.append(translated or _TRANSLATION_FAILURE_PREFIX + text)
 		return results
 
 	@staticmethod
@@ -1206,6 +1218,9 @@ class Translator:
 	@staticmethod
 	def _translation_prompt(text: str) -> str:
 		return f"{_LOCAL_TRANSLATION_INSTRUCTION}\n{text}"
+
+	def _translate_once(self, text: str, glossary: dict[str, str] | None) -> str:
+		return self._chat(self._system_prompt(glossary), self._translation_prompt(text))
 
 	def _chat(self, system_prompt: str, user_prompt: str) -> str:
 		try:
