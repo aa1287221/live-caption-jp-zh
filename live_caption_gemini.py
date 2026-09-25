@@ -1,7 +1,7 @@
 """
 live_caption_gemini.py
-跟 live_caption.py 完全一樣的內建擷取版，翻譯改呼叫 Ontime Riva
-本機翻譯服務。檔名保留 gemini 是為了相容既有捷徑與匯入路徑。
+跟 live_caption.py 完全一樣的內建擷取版，翻譯改呼叫本機語言模型。
+檔名保留 gemini 是為了相容既有捷徑與匯入路徑。
 
 使用情境：
   你是合法訂閱會員，在瀏覽器裡播放影片。這支程式只會擷取你電腦上「你自己選定的
@@ -15,8 +15,8 @@ live_caption_gemini.py
 安裝（一次就好）：
     pip install -r requirements.txt
 
-    確認 /project/Ontime-Translator 已安裝 Riva 模型與 relay。程式會重用
-    已就緒的服務，或透過 WSL 自動啟動翻譯專用 relay。不需要 API 金鑰。
+    請先自行啟動相容 llama-server completion API 的本機語言模型服務，並確認
+    LOCAL_LLM_BASE_URL 指向該服務。不需要雲端 API 金鑰。
 
 執行：
     python live_caption_gemini.py
@@ -38,7 +38,7 @@ live_caption_gemini.py
 
     如果有按過「開始錄製」，完整音訊會存成 transcript_YYYYMMDD_HHMMSS_audio.wav
     （播放期間暫存用），結束播放後自動用這份完整錄音重新辨識+翻譯一次（沒有
-    即時限制），再把每句原始日文交給 Riva 翻譯，產生
+    即時限制），再把每句原始日文交給本機語言模型翻譯，產生
     transcript_YYYYMMDD_HHMMSS_notebooklm_style.md。檔名為了相容舊版本而保留；
     內容是重新辨識的逐句雙語輸出，不會另做上下文校正或編輯潤飾。整理完成後那份 WAV
     錄音檔會自動刪除（本來就只是拿來重新辨識用，不是給人聽的，用完即刪）。
@@ -58,7 +58,6 @@ live_caption_gemini.py
     任何聲音。這個小聲的背景音通常不會很干擾，習慣了就好。
 """
 
-import os
 import sys
 import re
 import json
@@ -85,7 +84,7 @@ from PIL import Image, ImageTk
 
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
-from ontime_riva import OntimeRivaClient, RivaError
+from local_llm import LocalLLMClient, LocalLLMError
 
 # ---------- 硬體自動偵測 (5800X3D + RTX 5060 Ti 會自動吃 GPU) ----------
 _CUDA_OK = torch.cuda.is_available()
@@ -102,8 +101,7 @@ WHISPER_DEVICE = "cuda" if _CUDA_OK else "cpu"
 WHISPER_COMPUTE_TYPE = "float16" if _CUDA_OK else "int8"
 WHISPER_BEAM_SIZE = 5             # 用 beam search 選最佳辨識結果，GPU 才有餘裕開這個
 
-# Translation uses the installed Ontime Riva relay. Connection and lifecycle
-# settings live in ontime_riva.py.
+# The local client connects to a separately managed llama-server instance.
 
 TARGET_SR = 16000                 # Whisper / VAD / 延遲音訊緩衝區使用的取樣率
 VAD_CHUNK_SAMPLES = 512           # Silero VAD 在 16kHz 下要求的固定窗格大小 (32ms)
@@ -188,6 +186,33 @@ def load_glossary() -> dict:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"讀取 glossary.json 失敗，改用預設內容：{e}")
         return dict(_DEFAULT_GLOSSARY)
+
+
+def glossary_hint(glossary: dict) -> str:
+	"""Render glossary terms as explicit local-model instructions."""
+	if not glossary:
+		return ""
+	terms = sorted({term for term in glossary if term})
+	return (
+		"以下是專有名詞對照表；這些詞一律完全保留原文，不要翻譯、意譯或拆解：\n"
+		+ "\n".join(f"- {term}" for term in terms)
+	)
+
+
+_REPEAT_RUN_RE = re.compile(r"(.{1,4}?)\1{4,}")
+
+
+def _collapse_repetition(text: str) -> str:
+	"""Limit pathological repeated output from a local model."""
+	return _REPEAT_RUN_RE.sub(lambda match: match.group(1) * 2, text)
+
+
+_SYSTEM_PROMPT_BASE = (
+	"你是專業的日文-繁體中文口譯，正在幫忙即時翻譯日文廣播或網路節目的口語對話。"
+	"內容常有語助詞、停頓、話講到一半重講、省略主詞這類真人講話的狀況，"
+	"請翻成自然通順、口語化的繁體中文，不要逐字直譯。"
+	"只要輸出翻譯結果本身，不要加任何說明、引號、備註、拼音或原文。"
+)
 
 
 def resample_linear(x: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
@@ -340,7 +365,7 @@ def rebuild_transcript_from_full_audio(
 		print("完整錄音重新辨識沒有偵測到內容，略過這份整理稿。")
 		return None
 
-	print(f"重新辨識完成，共 {len(ja_lines)} 句，正在用 Riva 分批產生雙語逐字稿...")
+	print(f"重新辨識完成，共 {len(ja_lines)} 句，正在用本機模型分批產生雙語逐字稿...")
 
 	bilingual_parts = []
 	degraded_count = 0
@@ -363,8 +388,8 @@ def rebuild_transcript_from_full_audio(
 		"",
 		f"整理時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
 		"",
-		"這份逐字稿由完整錄音重新辨識，再將每句原始日文交給 Ontime Riva 翻譯。",
-		"Riva 不會參考前後句，也不會校正辨識結果或進行編輯潤飾。",
+		"這份逐字稿由完整錄音重新辨識，再將每句原始日文交給本機語言模型翻譯。",
+		"本機模型不會參考前後句，也不會校正辨識結果或進行編輯潤飾。",
 		"",
 		"---",
 		"",
@@ -877,7 +902,7 @@ class AudioCapture(threading.Thread):
     2. 同時把每一小段原始音訊寫進 AudioRingBuffer，供延遲播放用（不受 VAD 影響，
        靜音的部分也會寫進去，這樣延遲播放出來的聲音才會是連續、自然的）
     3. 如果手動按下「開始錄製」，同時把完整音訊寫成一個 WAV 檔存起來——結束播放
-       後可以用它重新辨識整段音訊，再將每句原始日文交給 Riva 翻譯，
+       後可以用它重新辨識整段音訊，再將每句原始日文交給本機模型翻譯，
        產生逐句對齊的雙語輸出。
     """
 
@@ -1122,29 +1147,26 @@ class AudioCapture(threading.Thread):
 
 
 _TRANSLATION_FAILURE_PREFIX = "（翻譯失敗，保留日文原文）"
-_RIVA_BATCH_SIZE = 32
+_LOCAL_BATCH_SIZE = 32
+_LOCAL_TRANSLATION_INSTRUCTION = "Translate this into Traditional Chinese:"
 
 
 class Translator:
-	"""Translate Japanese through the installed Ontime Riva relay."""
+	"""Translate Japanese through the configured local language model."""
 
 	def __init__(self) -> None:
-		self.client = OntimeRivaClient()
-		self.client.ensure_ready()
-		print(f"翻譯將使用 Ontime Riva：{self.client.base_url}")
+		self.client = LocalLLMClient()
+		print(f"翻譯將使用本機語言模型：{self.client.base_url}")
 
 	def translate(self, text: str, glossary: dict[str, str] | None = None) -> str:
 		"""Translate one live caption without retrying or hiding its source on failure."""
 		if not text.strip():
 			return ""
-		try:
-			translated = self.client.translate(text, glossary).strip()
-			if not translated:
-				raise RivaError("Riva 未回傳有效譯文。")
+		translated = self._chat(self._system_prompt(glossary), self._translation_prompt(text))
+		if translated:
 			return translated
-		except RivaError as exc:
-			print(f"Riva 翻譯失敗：{exc}")
-			return _TRANSLATION_FAILURE_PREFIX + text
+		print(f"本機模型翻譯失敗，保留原文：{text}")
+		return _TRANSLATION_FAILURE_PREFIX + text
 
 	def translate_with_context(
 		self,
@@ -1152,30 +1174,47 @@ class Translator:
 		current_ja: str,
 		glossary: dict[str, str] | None = None,
 	) -> str:
-		"""Compatibility wrapper; Riva translates only the current sentence."""
-		return self.translate(current_ja, glossary)
+		"""Translate the current sentence while retaining the previous sentence as context."""
+		if not current_ja.strip():
+			return ""
+		context = (
+			f"前一句話（僅供參考上下文，不用翻譯）：\n{prev_ja}\n\n"
+			if prev_ja else ""
+		)
+		prompt = context + f"請翻譯這一句：\n{current_ja}"
+		translated = self._chat(self._system_prompt(glossary), prompt)
+		return translated or _TRANSLATION_FAILURE_PREFIX + current_ja
 
 	def translate_batch(self, texts: list[str], glossary: dict[str, str] | None = None) -> list[str]:
-		"""Translate ordered chunks, retrying only transient offline failures."""
+		"""Translate ordered chunks while preserving the caller's one-to-one mapping."""
 		if not texts:
 			return []
 		results = []
-		for offset in range(0, len(texts), _RIVA_BATCH_SIZE):
-			chunk = texts[offset:offset + _RIVA_BATCH_SIZE]
-			for attempt in range(3):
-				try:
-					translated = self.client.translate_batch(chunk, glossary)
-					if len(translated) != len(chunk):
-						raise RivaError("Riva 回傳數量與原文不一致。")
-					results.extend(translated)
-					break
-				except RivaError as exc:
-					print(f"Riva 批次翻譯失敗：{exc}")
-					if not exc.retryable or attempt == 2:
-						results.extend(_TRANSLATION_FAILURE_PREFIX + text for text in chunk)
-						break
-					time.sleep(20)
+		for offset in range(0, len(texts), _LOCAL_BATCH_SIZE):
+			chunk = texts[offset:offset + _LOCAL_BATCH_SIZE]
+			# Completion responses are single strings, so translate each item to keep
+			# the caller's ordered one-to-one mapping without fragile response parsing.
+			results.extend(self.translate(text, glossary) for text in chunk)
 		return results
+
+	@staticmethod
+	def _system_prompt(glossary: dict[str, str] | None) -> str:
+		prompt = _SYSTEM_PROMPT_BASE
+		hint = glossary_hint(glossary) if glossary else ""
+		return prompt + ("\n" + hint if hint else "")
+
+	@staticmethod
+	def _translation_prompt(text: str) -> str:
+		return f"{_LOCAL_TRANSLATION_INSTRUCTION}\n{text}"
+
+	def _chat(self, system_prompt: str, user_prompt: str) -> str:
+		try:
+			if not user_prompt.lstrip().startswith(_LOCAL_TRANSLATION_INSTRUCTION):
+				user_prompt = self._translation_prompt(user_prompt)
+			return _collapse_repetition(self.client.chat(system_prompt, user_prompt))
+		except LocalLLMError as exc:
+			print(f"本機模型翻譯失敗：{exc}")
+			return ""
 
 
 class Worker(threading.Thread):
@@ -1211,7 +1250,7 @@ class Worker(threading.Thread):
         self._recent_ja_texts = deque(maxlen=4)
         self._hallucination_loop_warned = False
 
-        # Kept for the compatibility method signature; Riva receives only current_ja.
+        # Keep the compatibility field for callers that inspect the previous sentence.
         self.prev_ja = ""
 
         self.glossary = load_glossary()
@@ -1284,8 +1323,7 @@ class Worker(threading.Thread):
             # 視窗會直接顯示（不會反而更晚跳出）
             release_at = capture_time + DISPLAY_DELAY_SEC
 
-            # Riva receives only the current sentence. Both views reuse the same
-            # ordered result so the caption and transcript stay aligned.
+            # Both views reuse the same ordered result so the caption and transcript stay aligned.
             zh_final = self.translator.translate_with_context(self.prev_ja, ja_text, self.glossary)
             self.prev_ja = ja_text
             self.transcript_queue.put((release_at, ja_text, zh_final))
@@ -1598,7 +1636,7 @@ OUTPUT_DEFAULT_LABEL = "系統預設（可能會有回音問題）"
 def main():
     global DISPLAY_DELAY_SEC
 
-    print("=== 即時中日對照字幕（Ontime Riva 版） ===")
+    print("=== 即時中日對照字幕（本機語言模型版） ===")
 
     from tkinter import filedialog, messagebox
     from startup_gui import run_startup_dialog, load_last_settings, save_last_settings, index_of_name
@@ -1717,7 +1755,7 @@ def main():
         "output_device": output_names[dialog["output_index"]] if dialog["output_index"] == 0 else output_candidates[dialog["output_index"] - 1][1],
     })
 
-    # Complete Riva startup before changing the source application's audio route.
+    # Initialize translation before changing the source application's audio route.
     translator = Translator() if cue_data is None else None
 
     using_virtual_cable = bool(input_device and "CABLE" in input_device["name"].upper())

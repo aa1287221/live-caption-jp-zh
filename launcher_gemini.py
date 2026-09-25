@@ -20,7 +20,7 @@ def main():
     base_dir = get_base_dir()
     target = os.path.join(base_dir, "live_caption_gemini.py")
 
-    print("=== 即時中日對照字幕（本機模型版）啟動器 ===")
+    print("=== 即時中日對照字幕（本機語言模型版）啟動器 ===")
     print(f"程式資料夾：{base_dir}\n")
 
     if not os.path.exists(target):

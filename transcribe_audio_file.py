@@ -6,7 +6,7 @@ transcribe_audio_file.py
 
 適合純語音、內容已經完整存在（時差重播、自己先下載好）的節目——這種情況下
 不用受即時處理的延遲限制，可以讓 Whisper 重新辨識整段音訊，再將原始日文
-逐句交給 Ontime Riva 翻譯；正式收聽時字幕也可以
+逐句交給本機語言模型翻譯；正式收聽時字幕也可以
 幾乎零延遲顯示，因為所有運算都已經在這一步事先做完了。
 
 用法：
@@ -17,8 +17,8 @@ transcribe_audio_file.py
       <音檔檔名>_transcript.md    給你自己看的可讀逐字稿（帶時間戳記）
 
 音檔格式：mp3/wav/m4a 等 ffmpeg 支援的格式都可以（faster-whisper 內部靠
-ffmpeg 讀取）。Ontime Riva 連線與自動啟動設定沿用
-live_caption_gemini.py；不需要 API 金鑰。
+ffmpeg 讀取）。本機語言模型連線設定沿用 live_caption_gemini.py；
+不需要雲端 API 金鑰。
 """
 
 import argparse
@@ -39,12 +39,12 @@ from live_caption_gemini import (
     _HALLUCINATION_DENYLIST,
 )
 
-_CHUNK_LINES = 32  # Match the relay's maximum number of strings per request.
+_CHUNK_LINES = 32  # Keep offline output batches bounded and ordered.
 
 
 def transcribe_audio_file(audio_path: Path, episode_title: str = "") -> tuple[Path, Path] | None:
 	"""回傳 (cues_path, transcript_path)；沒辨識到任何內容則回傳 None。"""
-	print("連線 Ontime Riva...")
+	print("連線本機語言模型...")
 	translator = Translator()
 	print(f"載入語音辨識模型（Whisper {WHISPER_MODEL_SIZE}）...")
 	asr = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
