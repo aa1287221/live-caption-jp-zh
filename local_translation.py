@@ -249,6 +249,7 @@ class LocalTranslationEngine:
 		batch_max_tokens=None,
 		startup_wait=None,
 		segment_chars=None,
+		context_lines=None,
 		max_consecutive_failures: int = 3,
 		cooldown_seconds: float = 30.0,
 		postprocess=None,
@@ -262,6 +263,8 @@ class LocalTranslationEngine:
 		self.batch_max_tokens = int(_env_number(batch_max_tokens, "LOCAL_LLM_BATCH_MAX_TOKENS", 4096, int))
 		self.startup_wait = float(_env_number(startup_wait, "LOCAL_LLM_STARTUP_WAIT", 120.0, float, allow_zero=True))
 		self.segment_chars = int(_env_number(segment_chars, "LOCAL_LLM_SEGMENT_CHARS", 120, int))
+		# Local batches are smaller than Gemini's, so each one carries more preceding lines.
+		self.context_lines = int(_env_number(context_lines, "LOCAL_LLM_CONTEXT_LINES", 8, int, allow_zero=True))
 		self.max_consecutive_failures = max_consecutive_failures
 		self.cooldown_seconds = cooldown_seconds
 		self.postprocess = postprocess or (lambda text: text)
@@ -294,6 +297,8 @@ class LocalTranslationEngine:
 			notices.append(error)
 
 		self.client.ensure_ready(self.startup_wait, poll_interval=2.0, on_wait=on_wait, clock=self.clock, sleep=self.sleep)
+		# Resolving the mode reads /props, which also fills in server_info.
+		self.client.mode
 		info = self.client.server_info
 		model_name = self.client.model or info.get("model_alias") or info.get("model_path") or "伺服器目前載入的模型"
 		if self.is_translation_only:
@@ -379,8 +384,20 @@ class LocalTranslationEngine:
 
 	# ---------- batch requests ----------
 
-	def batch_chat(self, system_prompt: str, user_prompt: str, *, max_tokens: int | None = None) -> str:
-		"""Offline request: brief retries for transient errors, circuit breaker for a dead server."""
+	def batch_chat(
+		self,
+		system_prompt: str,
+		user_prompt: str,
+		*,
+		max_tokens: int | None = None,
+		splittable: bool = False,
+	) -> str:
+		"""Offline request: brief retries for transient errors, circuit breaker for a dead server.
+
+		With ``splittable`` a timeout is raised at once so the caller can resend a smaller
+		batch; a slow model is not the same as a dead server. Consecutive failures of any
+		retryable kind still open the circuit breaker.
+		"""
 		attempt = 0
 		while True:
 			try:
@@ -391,6 +408,8 @@ class LocalTranslationEngine:
 					self._batch_failures += 1
 					if self._batch_failures >= self.max_consecutive_failures:
 						raise LocalServiceUnavailable(f"本機模型服務持續沒有回應：{error}") from error
+					if error.kind == "timeout" and splittable:
+						raise
 					if attempt < len(self.RETRY_DELAYS):
 						delay = self.RETRY_DELAYS[attempt]
 						self.log(f"  本機模型暫時沒有回應，{delay:g} 秒後重試：{error}")
@@ -401,6 +420,11 @@ class LocalTranslationEngine:
 			self._batch_failures = 0
 			self.last_error = None
 			return self.postprocess(text).strip()
+
+	@staticmethod
+	def _should_split(error: LocalLLMError, indices: list[int]) -> bool:
+		"""Errors a smaller request can fix; anything else will not improve by splitting."""
+		return error.too_large or error.kind in ("empty", "protocol") or (error.kind == "timeout" and len(indices) > 1)
 
 	def _budget(self, batch: list[str], factor: float) -> int:
 		chars = sum(len(text) for text in batch)
@@ -477,10 +501,11 @@ class LocalTranslationEngine:
 		build_user_prompt,
 		parse_numbered,
 		context_prompts,
-		tail_lines: int = 2,
+		tail_lines: int | None = None,
 		progress=None,
 	) -> BatchOutcome:
 		"""Translate ``texts`` one-to-one with the caller's numbered-batch prompts."""
+		tail_lines = self.context_lines if tail_lines is None else tail_lines
 		results = [""] * len(texts)
 		outcome = BatchOutcome(results)
 		total = (len(texts) + self.batch_lines - 1) // self.batch_lines
@@ -511,12 +536,15 @@ class LocalTranslationEngine:
 		context_tail = "\n".join(texts[max(0, indices[0] - tail_lines):indices[0]])
 		parsed = None
 		try:
-			reply = self.batch_chat(system_prompt, build_user_prompt(batch, context_tail), max_tokens=self._budget(batch, 2.0))
+			reply = self.batch_chat(
+				system_prompt, build_user_prompt(batch, context_tail),
+				max_tokens=self._budget(batch, 2.0), splittable=len(indices) > 1,
+			)
 			parsed = parse_numbered(reply, len(batch))
 		except LocalServiceUnavailable:
 			raise
 		except LocalLLMError as error:
-			if not (error.too_large or error.kind in ("empty", "protocol")):
+			if not self._should_split(error, indices):
 				return
 		if parsed is None:
 			if len(indices) > 1:
@@ -552,10 +580,11 @@ class LocalTranslationEngine:
 		system_prompt: str,
 		build_user_prompt,
 		context_prompts,
-		tail_lines: int = 2,
+		tail_lines: int | None = None,
 		progress=None,
 	) -> list[str] | None:
 		"""Return rendered "日文\\n中文" blocks per batch, or None if the server went away."""
+		tail_lines = self.context_lines if tail_lines is None else tail_lines
 		parts = []
 		total = (len(ja_lines) + self.batch_lines - 1) // self.batch_lines
 		try:
@@ -578,14 +607,17 @@ class LocalTranslationEngine:
 		context_tail = "\n".join(lines[max(0, indices[0] - tail_lines):indices[0]])
 		pairs = None
 		try:
-			reply = self.batch_chat(system_prompt, build_user_prompt(batch, context_tail), max_tokens=self._budget(batch, 3.0))
+			reply = self.batch_chat(
+				system_prompt, build_user_prompt(batch, context_tail),
+				max_tokens=self._budget(batch, 3.0), splittable=len(indices) > 1,
+			)
 			candidate = parse_bilingual_pairs(reply)
 			if bilingual_pairs_acceptable(candidate, batch, glossary):
 				pairs = candidate
 		except LocalServiceUnavailable:
 			raise
 		except LocalLLMError as error:
-			if not (error.too_large or error.kind in ("empty", "protocol")):
+			if not self._should_split(error, indices):
 				# A permanent request error will not improve by splitting; keep the source visible.
 				return [(ja, TRANSLATION_FAILED_TEXT) for ja in batch]
 		if pairs is not None:

@@ -258,6 +258,39 @@ class BatchTests(unittest.TestCase):
 		self.assertEqual(outcome.results, [f"譯文{i}" for i in range(4)])
 		self.assertEqual(len(client.calls), 3)
 
+	def test_slow_model_timeouts_split_batches_instead_of_aborting(self):
+		def handler(system, user, n):
+			if "（共 4 句）" in user:
+				return LocalLLMError("逾時", retryable=True, kind="timeout")
+			return numbered_reply(user)
+		engine, client, clock, _ = make_engine(handler, batch_lines=4)
+		outcome = engine.translate_numbered(
+			[f"文{i}" for i in range(8)], glossary=None, system_prompt="SYS", build_user_prompt=numbered_prompt,
+			parse_numbered=parse_numbered, context_prompts=context_prompts,
+		)
+		self.assertFalse(outcome.aborted)
+		self.assertEqual(outcome.results, [f"譯文{i}" for i in range(8)])
+		self.assertEqual(clock.sleeps, [])
+
+	def test_hung_server_aborts_after_consecutive_timeouts(self):
+		engine, client, _, _ = make_engine(lambda s, u, n: LocalLLMError("逾時", retryable=True, kind="timeout"), batch_lines=8)
+		outcome = engine.translate_numbered(
+			[f"文{i}" for i in range(8)], glossary=None, system_prompt="SYS", build_user_prompt=numbered_prompt,
+			parse_numbered=parse_numbered, context_prompts=context_prompts,
+		)
+		self.assertTrue(outcome.aborted)
+		self.assertEqual(len(client.calls), 3)
+
+	def test_later_batches_carry_more_preceding_lines_than_gemini(self):
+		engine, client, _, _ = make_engine(lambda s, u, n: numbered_reply(u), batch_lines=10)
+		self.assertEqual(engine.context_lines, 8)
+		engine.translate_numbered(
+			[f"文{i}" for i in range(20)], glossary=None, system_prompt="SYS", build_user_prompt=numbered_prompt,
+			parse_numbered=parse_numbered, context_prompts=context_prompts,
+		)
+		tail = client.calls[1]["user"].split("\n\n", 1)[0]
+		self.assertEqual(tail, "（前面幾句當上下文參考，不用重複翻譯：\n" + "\n".join(f"文{i}" for i in range(2, 10)))
+
 	def test_numbered_batch_reports_abort_when_server_dies(self):
 		engine, _, _, _ = make_engine(lambda s, u, n: connection_error(), batch_lines=2)
 		outcome = engine.translate_numbered(
