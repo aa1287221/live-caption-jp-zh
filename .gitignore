@@ -16,7 +16,6 @@ __pycache__/
 
 # 執行期間產生的逐字稿、錄音、個人收聽紀錄
 transcripts/
-ontime-riva.log
 
 # 開發過程中的備份資料夾
 backup_*/
