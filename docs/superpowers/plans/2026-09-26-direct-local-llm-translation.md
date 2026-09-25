@@ -1,5 +1,7 @@
 # Direct local LLM translation implementation plan
 
+> **Status:** partly superseded by `2026-09-26-dual-backend-gemini-parity.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Gemini API inference with direct local llama-server `/completion` calls while preserving the repository's existing translation workflows.

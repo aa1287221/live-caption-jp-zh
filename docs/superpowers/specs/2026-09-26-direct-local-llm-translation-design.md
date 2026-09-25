@@ -1,5 +1,7 @@
 # Direct local LLM translation replacement
 
+> **Status:** partly superseded by `2026-09-26-dual-backend-gemini-parity-design.md`. The `/completion` contract below is kept as `LOCAL_LLM_MODE=riva`; Gemini is kept as the default engine instead of being replaced.
+
 ## Approved intent
 
 Replace the Gemini inference boundary in this repository with the local LLM

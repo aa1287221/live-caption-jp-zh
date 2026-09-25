@@ -1,5 +1,6 @@
 # 先照 README.md 的指示單獨安裝有 CUDA 支援的 torch，再安裝以下套件
-# 翻譯使用外部獨立啟動的 llama-server completion API，不需要 transformers/sentencepiece。
+# 翻譯引擎：Gemini API（google-genai，見最下方）或自己啟動的本機 llama-server（只用標準函式庫呼叫），
+# 不需要 transformers/sentencepiece
 PyAudioWPatch
 faster-whisper
 silero-vad

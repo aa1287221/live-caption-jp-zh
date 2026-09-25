@@ -1,5 +1,7 @@
 # Direct execution with Ontime Riva
 
+> **Status:** superseded by `2026-09-26-dual-backend-gemini-parity-design.md`. The Ontime relay client and WSL auto-start were removed; Riva-Translate is used directly through llama-server (`LOCAL_LLM_MODE=riva`).
+
 Status: approved by the user on 2026-09-20. This follows the instruction-model migration at `2e811b3` and supersedes its requirement to provision another model.
 
 ## Outcome and accepted tradeoff

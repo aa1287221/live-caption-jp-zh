@@ -1,5 +1,7 @@
 # Local translation with feature parity
 
+> **Status:** superseded by `2026-09-26-dual-backend-gemini-parity-design.md`. The chat-completions transport described here lives on as `LOCAL_LLM_MODE=instruct`; Gemini is no longer replaced.
+
 ## Approved intent
 
 Replace Gemini inference with a local language model while preserving the existing application functions. The user approved implementation on 2026-09-20. Existing entrypoint names remain valid for launcher, shortcut, and offline-transcription compatibility.
