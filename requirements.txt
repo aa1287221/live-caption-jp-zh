@@ -14,3 +14,7 @@ pywin32
 Pillow
 opencv-python
 scipy
+
+# Gemini 版 / 啟動器用
+google-genai
+psutil
