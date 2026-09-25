@@ -49,6 +49,23 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 依賴其他專案，也不需要 Google API 金鑰。例如服務使用預設連接埠時，先在另一個
 終端機啟動你的 `llama-server`，再執行本程式。
 
+例如，你可以用自己準備的 GGUF 模型啟動服務（請將路徑換成實際檔案）：
+
+```bash
+llama-server -m /path/to/your-translation-model.gguf --host 127.0.0.1 --port 8766
+```
+
+啟動後可用以下請求確認 completion 介面與取樣設定：
+
+```bash
+curl http://127.0.0.1:8766/completion \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"<s>System\n只輸出繁體中文翻譯</s>\n<s>User\nTranslate this into Traditional Chinese:\n今日はいい天気ですね。</s>\n<s>Assistant\n","stream":false,"temperature":0,"top_p":1,"top_k":0,"repeat_penalty":1,"seed":1234,"n_predict":256,"stop":["</s>","<s>"]}'
+```
+
+回應應包含非空的 JSON 字串欄位 `content`。若模型服務使用其他主機或連接埠，
+再設定下方的 `LOCAL_LLM_BASE_URL`。
+
 ### 3. 安裝其餘 Python 套件
 
 ```bash

@@ -85,6 +85,58 @@ class LocalTranslationIntegrationTests(unittest.TestCase):
 		translator.client.chat.assert_called_once()
 		sleep.assert_not_called()
 
+	def test_empty_inputs_make_no_translation_calls(self):
+		translator, _ = self.make_translator()
+
+		self.assertEqual(translator.translate("  "), "")
+		self.assertEqual(translator.translate_with_context("前句", "\t"), "")
+		self.assertEqual(translator.translate_batch([], {"田中": "田中先生"}), [])
+		translator.client.chat.assert_not_called()
+
+	def test_worker_reuses_injected_translator_without_constructing_another(self):
+		translator = mock.Mock()
+		with tempfile.TemporaryDirectory() as temp_dir, \
+				mock.patch.object(self.app, "Translator") as translator_class, \
+				mock.patch.object(self.app, "WhisperModel"), \
+				mock.patch.object(self.app, "load_glossary", return_value={}), \
+				mock.patch.object(self.app, "TRANSCRIPT_DIR", Path(temp_dir)):
+			worker = self.app.Worker(
+				queue.Queue(), queue.Queue(), queue.Queue(), translator=translator
+			)
+
+		self.assertIs(worker.translator, translator)
+		translator_class.assert_not_called()
+
+	def test_offline_checks_translation_before_constructing_or_running_whisper(self):
+		events = []
+		segment = FakeSegment(0)
+		fake_asr = mock.Mock()
+		fake_asr.transcribe.side_effect = lambda *_args, **_kwargs: (
+			events.append("whisper_transcribed") or ([segment], None)
+		)
+		translator = mock.Mock()
+		translator.translate_batch.return_value = ["中文1"]
+		sys.modules.pop("transcribe_audio_file", None)
+		offline = importlib.import_module("transcribe_audio_file")
+
+		def make_translator():
+			events.append("translator_ready")
+			return translator
+
+		def make_whisper(*_args, **_kwargs):
+			events.append("whisper_loaded")
+			return fake_asr
+
+		with tempfile.TemporaryDirectory() as temp_dir:
+			audio_path = Path(temp_dir) / "episode.wav"
+			audio_path.write_bytes(b"audio")
+			with mock.patch.object(offline, "Translator", side_effect=make_translator), \
+					mock.patch.object(offline, "WhisperModel", side_effect=make_whisper), \
+					mock.patch.object(offline, "load_glossary", return_value={}):
+				offline.transcribe_audio_file(audio_path)
+
+		self.assertEqual(events, ["translator_ready", "whisper_loaded", "whisper_transcribed"])
+
 	def test_batch_retries_only_retryable_local_errors(self):
 		translator, _ = self.make_translator()
 		translator.client.chat.side_effect = [
@@ -149,6 +201,55 @@ class LocalTranslationIntegrationTests(unittest.TestCase):
 
 		self.assertIn("日文1\n中文1", markdown)
 		unlink.assert_called_once_with()
+
+	def test_full_audio_reconstruction_batches_33_cues_in_order(self):
+		segments = [FakeSegment(index) for index in range(33)]
+		asr = mock.Mock()
+		asr.transcribe.return_value = (segments, None)
+		translator = mock.Mock()
+		translator.translate_batch.side_effect = [
+			[f"中文{index + 1}" for index in range(32)], ["中文33"]
+		]
+		with tempfile.TemporaryDirectory() as temp_dir:
+			wav_path = Path(temp_dir) / "show_audio.wav"
+			wav_path.write_bytes(b"audio")
+			with mock.patch.object(Path, "unlink"):
+				output = self.app.rebuild_transcript_from_full_audio(
+					wav_path, asr, translator, {"田中": "田中先生"}, "節目"
+				)
+				markdown = output.read_text(encoding="utf-8")
+
+		self.assertEqual([len(call.args[0]) for call in translator.translate_batch.call_args_list], [32, 1])
+		self.assertIn("日文1\n中文1", markdown)
+		self.assertIn("日文33\n中文33", markdown)
+		self.assertNotIn("潤稿", markdown)
+
+	def test_full_audio_fallback_remains_visible_and_cleanup_is_preserved(self):
+		asr = mock.Mock()
+		asr.transcribe.return_value = ([FakeSegment(0)], None)
+		translator = mock.Mock()
+		translator.translate_batch.return_value = ["（翻譯失敗，保留日文原文）日文1"]
+		with tempfile.TemporaryDirectory() as temp_dir:
+			wav_path = Path(temp_dir) / "fallback_audio.wav"
+			wav_path.write_bytes(b"audio")
+			with mock.patch.object(Path, "unlink") as unlink:
+				output = self.app.rebuild_transcript_from_full_audio(wav_path, asr, translator, None)
+				markdown = output.read_text(encoding="utf-8")
+
+		self.assertIn("日文1\n（翻譯失敗，保留日文原文）日文1", markdown)
+		unlink.assert_called_once_with()
+
+	def test_pretranslated_cues_preserve_queue_timing_and_tuple_shape(self):
+		caption_queue = queue.Queue()
+		transcript_queue = queue.Queue()
+		cues = [{"start": 1.25, "end": 2.5, "ja": "日本語", "zh": "中文"}]
+		with mock.patch.object(self.app, "Translator") as translator_class:
+			self.app.push_cues_to_queues(cues, caption_queue, transcript_queue, 100.0)
+
+		expected = (101.25 + self.app.DISPLAY_DELAY_SEC, "日本語", "中文")
+		self.assertEqual(caption_queue.get_nowait(), expected)
+		self.assertEqual(transcript_queue.get_nowait(), expected)
+		translator_class.assert_not_called()
 
 
 if __name__ == "__main__":
