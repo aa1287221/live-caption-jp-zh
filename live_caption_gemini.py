@@ -1913,36 +1913,7 @@ def main():
     import pygetwindow as gw
     import win32process
 
-    # 先問這次是「即時辨識」還是「讀取預先轉錄好的字幕檔」——後者要先用
-    # transcribe_audio_file.py 把音檔處理過，適合內容已經完整存在（時差重播、
-    # 自己先下載好）的節目，可以做到近乎零延遲的字幕，代價是要多播放一次
-    _mode_root = tk.Tk()
-    _mode_root.withdraw()
-    use_cue_mode = messagebox.askyesno(
-        "選擇模式",
-        "這次要讀取「預先轉錄好的字幕檔」嗎？\n\n"
-        "（要先用 transcribe_audio_file.py 處理過音檔才會有這種檔案，"
-        "適合內容已經完整存在的重播節目，字幕反應速度會快很多）\n\n"
-        "選「否」的話，照舊即時辨識+翻譯。",
-        parent=_mode_root,
-    )
     cue_data = None
-    if use_cue_mode:
-        cue_path_str = filedialog.askopenfilename(
-            title="選擇時間軸字幕檔（_cues.json）",
-            filetypes=[("字幕檔", "*_cues.json"), ("所有檔案", "*.*")],
-            parent=_mode_root,
-        )
-        if not cue_path_str:
-            _mode_root.destroy()
-            print("沒有選擇字幕檔，結束程式。")
-            sys.exit(0)
-        cue_data = load_cue_file(Path(cue_path_str))
-        if cue_data is None:
-            _mode_root.destroy()
-            sys.exit(1)
-        print(f"已載入 {len(cue_data['cues'])} 句預先轉錄好的字幕。")
-    _mode_root.destroy()
 
     last = load_last_settings(SETTINGS_PATH)
 
