@@ -97,18 +97,35 @@ class LocalLLMClientContractTests(unittest.TestCase):
 		client, opener = self.make_client(error)
 		with self.assertRaisesRegex(LocalLLMError, "HTTP 503") as caught:
 			client.complete("SECRET_PROMPT")
+		self.assertTrue(caught.exception.retryable)
 		self.assertNotIn("SECRET_BODY", str(caught.exception))
 		self.assertEqual(len(opener.calls), 1)
 		client, opener = self.make_client(urllib.error.URLError(socket.timeout("timed out")))
 		with mock.patch("time.sleep") as sleep:
-			with self.assertRaisesRegex(LocalLLMError, "連線"):
+			with self.assertRaisesRegex(LocalLLMError, "連線") as caught:
 				client.complete("prompt")
+		self.assertTrue(caught.exception.retryable)
 		sleep.assert_not_called()
 		self.assertEqual(len(opener.calls), 1)
 		client, opener = self.make_client(http.client.IncompleteRead(b"SECRET", 100))
-		with self.assertRaisesRegex(LocalLLMError, "連線"):
+		with self.assertRaisesRegex(LocalLLMError, "連線") as caught:
 			client.complete("prompt")
+		self.assertTrue(caught.exception.retryable)
 		self.assertEqual(len(opener.calls), 1)
+
+	def test_non_retryable_response_errors_are_marked_permanent(self):
+		for status in (400, 401, 404, 422):
+			error = urllib.error.HTTPError(
+				"http://127.0.0.1:8766/completion", status, "failure", {}, io.BytesIO(b"bad")
+			)
+			client, _ = self.make_client(error)
+			with self.assertRaises(LocalLLMError) as caught:
+				client.complete("prompt")
+			self.assertFalse(caught.exception.retryable)
+		client, _ = self.make_client(response("partial", stop_type="limit"))
+		with self.assertRaises(LocalLLMError) as caught:
+			client.complete("prompt")
+		self.assertFalse(caught.exception.retryable)
 
 	def test_configuration_defaults_environment_and_validation(self):
 		client, _ = self.make_client()

@@ -1156,6 +1156,7 @@ class Translator:
 
 	def __init__(self) -> None:
 		self.client = LocalLLMClient()
+		self._last_error: LocalLLMError | None = None
 		print(f"翻譯將使用本機語言模型：{self.client.base_url}")
 
 	def translate(self, text: str, glossary: dict[str, str] | None = None) -> str:
@@ -1200,6 +1201,8 @@ class Translator:
 					translated = self._translate_once(text, glossary)
 					if translated:
 						break
+					if self._last_error is None or not self._last_error.retryable:
+						break
 					if attempt < 2:
 						print(
 							f"第 {offset // _LOCAL_BATCH_SIZE + 1} 批第 {item_no} 句翻譯失敗，"
@@ -1223,11 +1226,13 @@ class Translator:
 		return self._chat(self._system_prompt(glossary), self._translation_prompt(text))
 
 	def _chat(self, system_prompt: str, user_prompt: str) -> str:
+		self._last_error = None
 		try:
 			if not user_prompt.lstrip().startswith(_LOCAL_TRANSLATION_INSTRUCTION):
 				user_prompt = self._translation_prompt(user_prompt)
-			return _collapse_repetition(self.client.chat(system_prompt, user_prompt))
+			return _collapse_repetition(self.client.chat(system_prompt, user_prompt)).strip()
 		except LocalLLMError as exc:
+			self._last_error = exc
 			print(f"本機模型翻譯失敗：{exc}")
 			return ""
 

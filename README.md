@@ -42,22 +42,12 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 要印出 `True` 跟你的顯卡名稱，且不要有 `sm_120 is not compatible` 之類的警告才算成功。
 
-### 2. 確認 Ontime Riva 已安裝
+### 2. 先獨立啟動本機語言模型服務
 
-翻譯直接使用 `/project/Ontime-Translator` 的 Riva 模型與 relay，不需要另外
-安裝聊天模型，也不需要 API 金鑰。原本用於畫面、音訊擷取與 Whisper
-的 Windows Python 環境仍然需要；Riva 由 WSL 提供翻譯服務。
-
-若想手動啟動翻譯專用 relay，在 WSL 執行：
-
-```bash
-cd /project/Ontime-Translator
-./start-relay.sh --no-preload --port 8765
-```
-
-`--no-preload` 會跳過 Ontime 的 ASR 預載，避免與這個專案的 Whisper 重複佔用顯示記憶體；
-Riva NMT 仍會載入。一般情況不用先手動啟動，程式會先沿用已就緒或正在啟動的
-relay，確認本機連接埠沒有服務後才會自動啟動，結束字幕程式時不會停掉 relay。
+翻譯會直接呼叫你自行管理的 `llama-server` completion API。請先啟動已載入
+本機翻譯模型的服務，並確認它提供 `POST /completion`；本專案不會啟動、安裝或
+依賴其他專案，也不需要 Google API 金鑰。例如服務使用預設連接埠時，先在另一個
+終端機啟動你的 `llama-server`，再執行本程式。
 
 ### 3. 安裝其餘 Python 套件
 
@@ -65,54 +55,32 @@ relay，確認本機連接埠沒有服務後才會自動啟動，結束字幕程
 pip install -r requirements.txt
 ```
 
-### Ontime Riva 設定
+### 本機語言模型設定
 
-`live_caption_gemini.py` 與 `transcribe_audio_file.py` 現在都直接使用 Riva
-`POST /v1/translate`；檔名中的 `gemini` 僅為了相容既有捷徑與 Python 匯入路徑。
+`live_caption_gemini.py` 與 `transcribe_audio_file.py` 都直接使用本機模型的
+`POST /completion`；檔名中的 `gemini` 僅為了相容既有捷徑與 Python 匯入路徑。
+目前使用固定的低溫度翻譯取樣設定，實際翻譯品質與延遲取決於你載入的模型及硬體。
 預設值如下：
 
 | 環境變數 | 預設值 | 用途 |
 | --- | --- | --- |
-| `ONTIME_RELAY_URL` | `http://127.0.0.1:8765` | relay 服務根網址 |
-| `ONTIME_REPO_PATH` | `/project/Ontime-Translator` | WSL 內的 Ontime 專案絕對路徑 |
-| `ONTIME_WSL_DISTRO` | `Ubuntu-26.04` | Windows 啟動 relay 時使用的 WSL 發行版 |
-| `ONTIME_AUTO_START` | `1` | 本機服務不存在時是否自動啟動 |
-| `ONTIME_START_TIMEOUT` | `180` | 等待 Riva NMT 就緒的秒數 |
-| `ONTIME_TRANSLATE_TIMEOUT` | `120` | 單次翻譯請求的秒數 |
+| `LOCAL_LLM_BASE_URL` | `http://127.0.0.1:8766` | `llama-server` 服務根網址 |
+| `LOCAL_LLM_TIMEOUT` | `120` | 單次翻譯請求的秒數 |
+| `LOCAL_LLM_MAX_TOKENS` | `256` | 單次翻譯的輸出上限 |
 
-Windows Python 會用參數陣列直接執行等效的指令：
+若服務不是使用預設網址，可在 PowerShell 執行程式前覆寫：
 
 ```powershell
-wsl.exe -d Ubuntu-26.04 -e bash /project/Ontime-Translator/start-relay.sh --no-preload --port 8765
-```
-
-如果你的 WSL 發行版或專案路徑不同，可在 PowerShell 執行程式前覆寫：
-
-```powershell
-$env:ONTIME_WSL_DISTRO = "Ubuntu-26.04"
-$env:ONTIME_REPO_PATH = "/project/Ontime-Translator"
+$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:8766"
+$env:LOCAL_LLM_TIMEOUT = "120"
+$env:LOCAL_LLM_MAX_TOKENS = "256"
 python live_caption_gemini.py
 python transcribe_audio_file.py recording.wav --title "節目名稱"
 ```
 
-relay 的 stdout/stderr 持續寫入專案根目錄的 `ontime-riva.log`。啟動失敗時，錯誤訊息會附上
-記錄檔路徑與有界限的末尾內容。程式不會中止沿用或自動啟動的 relay。
-
-可先用以下 smoke test 確認 NMT 已就緒並完成一句真實翻譯：
-
-```bash
-python3 -c 'from ontime_riva import OntimeRivaClient; c=OntimeRivaClient(); c.ensure_ready(); print(c.translate("今日はいい天気ですね。"))'
-```
-
-Riva 是專用翻譯模型，只接收目前的日文句子與受保護的專有名詞。與先前規劃的
-指令模型方案相比，它不會參考前句、不會校正 Whisper 辨識結果，也不做全篇編輯潤飾。
-這是只使用現有 Ontime Riva 就能直接執行的明確取捨。當某批翻譯被守門拒絕或連線失敗時，
-程式會保留句數與順序，並輸出精確標記 `（翻譯失敗，保留日文原文）<原文>`。
-
-用戶端會優先按句界將過長字幕保守分段，再送交固定 256-token 生成預算的 Riva NMT。
-relay 目前不會回傳模型的停止原因，因此這項 120 字元分段只能降低輸出遭截斷的風險，
-不能視為數學上的完整保證。若仍看到保留日文原文的 fallback 標記，請先查看應用程式主控台
-顯示的具體 guard 或 HTTP 錯誤；`ontime-riva.log` 則用於查看 relay 啟動及執行時記錄。
+服務連線失敗或 HTTP 429/5xx 時，批次翻譯會依既有次數重試；設定錯誤、格式錯誤、
+HTTP 其他 4xx、空回覆或輸出遭截斷時會立即保留日文原文。請確認本機服務可從執行
+字幕程式的環境連線，並預留語音辨識與翻譯共用的顯示記憶體。
 
 ## 執行
 
@@ -149,7 +117,7 @@ python live_caption_gemini.py
 - **延遲播放**：翻譯有時間在畫面播到那一刻之前先算好（見上方「運作原理」）
 - **斷句停頓門檻**（700ms）：避免說話中間換氣被過早切開
 - **Whisper 模型**：GPU 預設使用 `large-v3-turbo`，CPU 則使用 `small`
-- **Riva 守門與專有名詞保護**：拒絕數字等高風險改寫，並在翻譯前後檢查專有名詞標記完整性
+- **專有名詞提示**：`glossary.json` 的詞彙會附加到本機模型提示，協助維持專有名詞原文
 
 如果覺得字幕還是常常「等太久才跳出來」，可以把 `live_caption_gemini.py` 裡的
 `SILENCE_END_MS`（目前 700）調小一點，抓「準確度」跟「即時性」之間你想要的平衡點；
@@ -166,9 +134,5 @@ python live_caption_gemini.py
   （太小的視窗會被過濾掉，避免清單塞滿一堆工具列小圖示）
 - **畫面黑屏**：理論上跟 OBS 視窗擷取用同一套技術，先前測試過對這類會員影音平台
   不會黑屏；如果真的遇到黑屏，把情況告訴我再調整
-- **連接埠 8765 已被其他服務佔用**：程式不會強制停掉它或啟動第二個 relay；請停止佔用者，或將
-  relay 與 `ONTIME_RELAY_URL` 一起改用其他連接埠
-- **relay 有回應但模型未就緒**：檢查 `http://127.0.0.1:8765/health`；必須看到
-  `service` 為 `ontime-translator-relay`、`nmt.loaded` 為 `true`、`nmt.state` 為 `ready`，且 `nmt.error` 為空
-- **翻譯呼叫失敗／逾時**：先執行上方 smoke test，再檢查 `ontime-riva.log`；模型首次載入較慢時，
-  可調高 `ONTIME_START_TIMEOUT`，單次翻譯太慢則調高 `ONTIME_TRANSLATE_TIMEOUT`
+- **翻譯呼叫失敗／逾時**：確認獨立啟動的 `llama-server` 正在監聽
+  `LOCAL_LLM_BASE_URL`，再調高 `LOCAL_LLM_TIMEOUT` 或檢查服務主控台記錄

@@ -9,7 +9,11 @@ import urllib.request
 
 
 class LocalLLMError(RuntimeError):
-	"""Report local language-model configuration and transport failures."""
+	"""Report local language-model failures and whether they may be retried."""
+
+	def __init__(self, message: str, *, retryable: bool = False) -> None:
+		super().__init__(message)
+		self.retryable = retryable
 
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -96,9 +100,16 @@ class LocalLLMClient:
 				raw_response = response.read()
 		except urllib.error.HTTPError as error:
 			error.close()
-			raise LocalLLMError(f"本機模型 HTTP {error.code} 錯誤：請確認 {request.full_url} 端點與服務狀態。") from error
+			retryable = error.code == 429 or error.code >= 500
+			raise LocalLLMError(
+				f"本機模型 HTTP {error.code} 錯誤：請確認 {request.full_url} 端點與服務狀態。",
+				retryable=retryable,
+			) from error
 		except (urllib.error.URLError, http.client.HTTPException, socket.timeout, TimeoutError, OSError) as error:
-			raise LocalLLMError(f"本機模型連線失敗：請確認服務已啟動且可連線至 {request.full_url}。") from error
+			raise LocalLLMError(
+				f"本機模型連線失敗：請確認服務已啟動且可連線至 {request.full_url}。",
+				retryable=True,
+			) from error
 		try:
 			result = json.loads(raw_response.decode("utf-8"))
 		except (UnicodeDecodeError, json.JSONDecodeError) as error:
