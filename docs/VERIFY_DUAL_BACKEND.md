@@ -144,7 +144,10 @@ python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.tx
 >    只有 user prompt 改成呼叫共用的 `_rebuild_user_prompt` / `_offline_user_prompt`；請確認這兩個函式產生的字串跟 master 原本的 inline 字串完全一致。
 >    `GeminiPathTests` 與 `PromptParityTests` 就是在鎖這件事。
 > 3. 確認 #2 的修正（刪除重複的 `DelayedAudioPlayer.stop()`）在四個 `live_caption*.py` 都在。
-> 4. 檢查 `local_llm.py`、`local_translation.py`：只用標準函式庫、不會啟動或下載任何東西、錯誤訊息不含 prompt 或模型輸出。
+> 4. 檢查 `local_llm.py`、`local_translation.py`、`llama_server.py`：只用標準函式庫、錯誤訊息不含 prompt 或模型輸出。
+>    `llama_server.py` 會在「沒有任何服務回應且設定了 `model_path`」時自動啟動一個 `llama-server` 子行程、
+>    結束時關掉它自己啟動的這個子行程，但它本身**不下載**任何東西——下載只發生在使用者主動執行的
+>    `setup_local_llm.py`（見 `tests/test_llama_server.py`、`tests/test_setup_local_llm.py`）。
 > 5. 本機模型環境：先檢查 `ollama list`、`where.exe llama-server`、`nvidia-smi`（顯存）。
 >    缺什麼就依「B-0. 準備本機模型服務」的順序告訴維護者要準備什麼，並依顯存從步驟 2 的表格推薦模型；
 >    要驗證「不低於 Gemini」請推薦通用指令模型（Qwen2.5-14B-Instruct），不要推薦 Riva-Translate。

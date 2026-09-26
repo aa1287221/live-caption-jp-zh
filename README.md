@@ -11,7 +11,7 @@
 | 翻譯引擎 | 需要什麼 | 特色 |
 | --- | --- | --- |
 | **Gemini API**（預設） | Gemini API 金鑰 | 雲端大模型，會看前一句上下文、事後整理會校正辨識錯字並潤稿；有免費額度限制，逐字稿會送到 Google |
-| **本機語言模型** | 自己先啟動 `llama-server`（見下方） | 送出**跟 Gemini 完全相同的提示詞與流程**；不需要金鑰、沒有額度限制、逐字稿不離開你的電腦 |
+| **本機語言模型** | 跑一次 `setup_local_llm.py`（見下方） | 設定好會自動啟動 `llama-server`；送出**跟 Gemini 完全相同的提示詞與流程**；不需要金鑰、沒有額度限制、逐字稿不離開你的電腦 |
 
 ## 運作原理
 
@@ -81,13 +81,37 @@ pip install -r requirements.txt
 金鑰不要寫進程式碼、不要貼給任何人（`*_api_key.txt` 已在 `.gitignore`）。免費額度大約
 每天 1,000 次、每分鐘 15 次請求，實際以 Google 官方頁面為準；撞到額度時即時字幕會跳過那一句。
 
-#### B. 本機語言模型（llama-server）
+#### B. 本機語言模型（llama-server，設定好會自動啟動）
 
-> 第一次設定的話，照 `docs/VERIFY_DUAL_BACKEND.md` 的「B-0. 準備本機模型服務」一步一步做：
-> 先檢查有沒有現成的 Ollama、依顯存選模型、去哪裡下載 llama-server 與模型、怎麼確認啟動成功。
+**自動啟動（推薦，最簡單）**：執行一次 `setup_local_llm.py`，它會下載 llama-server（llama.cpp
+的 Windows CUDA 版執行檔）、預設模型（Gemma 4 26B-A4B QAT q4_0，實測顯存峰值約 12.4 GB、
+翻譯速度約 33 tok/s），驗證 sha256，解壓到 `tools/llama/`、模型放到 `models/`，並寫入
+`local_llm_server.json`：
 
-本程式不會幫你啟動、安裝或下載任何模型；請自己先啟動一個 `llama-server`（llama.cpp 的
-伺服器程式，可以從 llama.cpp 的 GitHub Releases 下載 Windows CUDA 版），載入 GGUF 模型：
+```bash
+python setup_local_llm.py            # 預設 CUDA 13.4；顯卡是 CUDA 12 系列就加 --cuda 12.4
+```
+
+設定好之後，選「本機語言模型」啟動主程式時，如果 `LOCAL_LLM_BASE_URL`（預設
+`http://127.0.0.1:8766`）沒有任何服務回應，程式會**自動啟動** `llama-server`、等它就緒
+（最多 `LOCAL_LLM_SPAWN_WAIT` 秒，預設 300）、結束時自動關掉它自己啟動的這個子行程
+（Windows 上還會放進 Job Object，就算程式異常結束也不會留下佔用顯存的殘留行程）——
+只有它自己啟動的服務才會被關掉，你已經在跑的 Ontime／Ollama／手動啟動的 llama-server
+永遠不會被動到。子行程的輸出會記到 `logs/llama-server.log`（啟動失敗時終端機也會印出
+結尾幾行方便排查）。**這支腳本是唯一會下載東西的地方，主程式本身從不下載任何模型或執行檔。**
+
+想自己調整啟動參數（例如 `--n-cpu-moe`、換更大的 `-c`），加 `--server-args`：
+
+```bash
+python setup_local_llm.py --server-args "-c 8192 -np 1 -ngl 99 --n-cpu-moe 26"
+```
+
+或直接編輯 `local_llm_server.json`（下次自動啟動就會套用，不用重跑 `setup_local_llm.py`）。
+換模型：`setup_local_llm.py --model-url <網址> --model-sha256 <sha256>`。
+
+**手動啟動（進階，或想用別的模型/伺服器）**：程式從不會去停掉一個已經在跑的服務，所以你也
+可以照舊自己啟動 `llama-server`、Ollama，或在 WSL 裡跑，程式偵測到已經有服務回應就會直接
+使用，不會重複啟動：
 
 ```bash
 llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ngl 99
@@ -102,7 +126,8 @@ llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ng
 - **想要跟 Gemini 一樣的效果（建議）**：用通用指令模型，例如 Qwen2.5-14B-Instruct 的
   Q4_K_M GGUF（約 9 GB 顯存；`live_caption.py`（Ollama 版）用的也是這個系列）。本程式會送出
   跟 Gemini 版一字不差的提示詞：即時字幕帶前一句上下文、事後整理會校正辨識錯字並潤稿、
-  預先轉錄用編號批次。16 GB 顯卡要跟 Whisper large-v3-turbo 共用，模型太大會爆顯存。
+  預先轉錄用編號批次。16 GB 顯卡要跟 Whisper large-v3 共用，模型太大會爆顯存
+  （`setup_local_llm.py` 裝的預設 Gemma 4 26B-A4B QAT q4_0 實測峰值約 12.4 GB，含 Whisper）。
 - **Riva-Translate 這類翻譯專用模型**：程式會自動偵測（模型名稱含 riva 或 Riva 的對話模板），
   改用 Ontime-Translator 的單句翻譯格式、專有名詞用記號保護後換回你設定的顯示文字、
   長句自動切段。速度快、顯存小，但**不會參考前一句、也不會校正或潤稿**，品質可能低於 Gemini；
@@ -215,6 +240,20 @@ python transcribe_audio_file.py 音檔.mp3 --title "節目名稱" --backend loca
 | `LOCAL_LLM_BATCH_MAX_TOKENS` | `4096` | 批次輸出上限（也不會超過服務 context 的一半） |
 | `LOCAL_LLM_CONTEXT_LINES` | `8` | 每批附帶的前文句數 |
 | `LOCAL_LLM_SEGMENT_CHARS` | `120` | 翻譯專用模型的長句切段長度 |
+| `WHISPER_MODEL` | GPU `large-v3`／CPU `small` | 覆寫語音辨識模型大小（`large-v3-turbo`、`medium`… 都可以） |
+
+**自動啟動 llama-server 用**（`setup_local_llm.py` 會幫你把這些寫進 `local_llm_server.json`，
+一般不需要自己設環境變數）：
+
+| 環境變數 | JSON 欄位 | 預設值 | 用途 |
+| --- | --- | --- | --- |
+| `LOCAL_LLM_SERVER_EXE` | `server_exe` | `tools/llama/llama-server.exe`（`setup_local_llm.py` 會放在這裡） | llama-server 執行檔路徑 |
+| `LOCAL_LLM_MODEL_PATH` | `model_path` | （空白） | 要載入的 GGUF；**沒有設就不會自動啟動** |
+| `LOCAL_LLM_SERVER_ARGS` | `server_args` | `-c 8192 -np 1 -ngl 99 --jinja --reasoning off` | 額外啟動參數（字串或 JSON 陣列都可以） |
+| `LOCAL_LLM_SPAWN_WAIT` | `startup_wait` | `300` | 等自動啟動的服務就緒的秒數上限 |
+
+相對路徑會以程式資料夾為基準解析；自動啟動只支援 `LOCAL_LLM_BASE_URL` 是本機位址
+（`127.0.0.1`／`localhost`）的情況，遠端服務請自己啟動。
 
 PowerShell 範例：
 
@@ -263,13 +302,23 @@ python -m unittest discover -s tests -p test_llama_server_live.py -v
 不想被翻譯、想保留原文的話，右邊填得跟左邊一樣就好。改完**下次重新啟動**才會生效。
 （Gemini 與本機通用指令模型用提示詞要求保留原文；翻譯專用模型會用記號保護後換成右邊的文字。）
 
+**這份清單也會餵給 Whisper 當 `initial_prompt`**（提示專有名詞的正確拼法），所以詞條要
+跟你實際在看的節目/來賓相符——塞進跟目前內容無關的人名/專有名詞，實測會讓 Whisper
+在雜音處反覆幻聽出重複片段，而不是真的幫忙辨識準確度。
+
+`glossary.json` 現在是**不進版控的本機檔案**（已加進 `.gitignore`）；第一次執行會照
+`_DEFAULT_GLOSSARY` 自動建立一份，之後你自己編輯的內容不會被 `git pull` 覆蓋，也不用擔心
+不小心把自己的清單提交上去。
+
 ## 準確度是怎麼拉高的
 
 - **延遲播放**：翻譯有時間在畫面播到那一刻之前先算好（見上方「運作原理」）
 - **上下文翻譯**：每句話翻譯時會參考前一句，代名詞/省略主詞這類日文常見狀況準確度好很多
   （Gemini 與本機通用指令模型都有；翻譯專用模型沒有）
 - **斷句停頓門檻**（700ms）：避免說話中間換氣被過早切開
-- **Whisper 模型**：GPU 預設使用 `large-v3-turbo`，CPU 則使用 `small`
+- **Whisper 模型**：GPU 預設使用 `large-v3`，CPU 則使用 `small`（可用 `WHISPER_MODEL` 環境
+  變數覆寫；`large-v3-turbo` 實測在有雜音的片段會出現重複片語與罐頭字句的幻覺，改用
+  `large-v3` 沒有這個問題，代價是每句多花約 0.3 秒）
 - **事後重新整理**：錄下的完整音訊會重新辨識，翻譯模型看過整批上下文後校正錯字、統一用詞
 
 如果覺得字幕還是常常「等太久才跳出來」，可以把 `live_caption_gemini.py` 裡的
@@ -287,15 +336,23 @@ python -m unittest discover -s tests -p test_llama_server_live.py -v
   `tools\SoundVolumeView.exe` 存在，或到 Windows 音量混音器手動把瀏覽器輸出設成 `CABLE Input`
 - **顯卡沒被吃到**：重新確認 torch 是否裝成 CUDA 版（`pip show torch` 版本號結尾
   應該是 `+cu130` 之類，而不是純 CPU 版）
-- **想換更準的 Whisper 模型**：把 `live_caption_gemini.py` 裡 `WHISPER_MODEL_SIZE` 改成
-  `"large-v3"`（需要顯存夠大，8GB 顯卡可能會爆顯存，16GB 應該沒問題）
+- **想換 Whisper 模型**：設定環境變數 `WHISPER_MODEL`（例如 `medium`），不用改程式碼
+  （GPU 預設已經是 `large-v3`；8GB 顯卡可能會爆顯存，16GB 應該沒問題）
 - **視窗清單找不到你要的視窗**：確認那個視窗沒有被最小化、且視窗大小夠大
   （太小的視窗會被過濾掉，避免清單塞滿一堆工具列小圖示）
 - **畫面黑屏**：理論上跟 OBS 視窗擷取用同一套技術，先前測試過對這類會員影音平台
   不會黑屏；如果真的遇到黑屏，把情況告訴我再調整
 - **Gemini 翻譯失敗**：確認金鑰正確；型號名稱錯誤時終端機會列出這把金鑰可用的型號
-- **本機模型連不上**：確認 llama-server 已啟動、網址與連接埠跟 `LOCAL_LLM_BASE_URL` 一致；
-  模型還在載入時程式會等待（最多 `LOCAL_LLM_STARTUP_WAIT` 秒）
+- **本機模型連不上**：
+  - 沒設定自動啟動（沒跑過 `setup_local_llm.py`、`local_llm_server.json` 裡沒有
+    `model_path`）：先照上面「自動啟動」跑一次 `setup_local_llm.py`，或自己啟動一個
+    `llama-server`／Ollama，確認網址與連接埠跟 `LOCAL_LLM_BASE_URL` 一致
+  - 設定了自動啟動但還是連不上：檢查終端機印出的錯誤訊息是不是找不到 `server_exe`
+    或 `model_path`（訊息會直接寫出是哪個路徑）；也可以看 `logs/llama-server.log`
+    的結尾幾行，通常是顯存不足、模型檔壞掉或參數打錯
+  - 已有服務在跑但沒被偵測到：確認它真的在 `LOCAL_LLM_BASE_URL` 這個位址上回應
+    `/health`；模型還在載入時程式會等待（自動啟動的服務最多等 `LOCAL_LLM_SPAWN_WAIT`
+    秒，預設 300；使用你自己啟動的服務則是 `LOCAL_LLM_STARTUP_WAIT` 秒，預設 120）
 - **本機模型翻得慢、字幕跟不上**：換小一點或量化更多的模型、確認 `-ngl` 有把模型放上 GPU，
   或把啟動時的延遲秒數調長
 - **終端機提示 context 太小**：用較大的 `-c`（例如 8192）重新啟動 llama-server
