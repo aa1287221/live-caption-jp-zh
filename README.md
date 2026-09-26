@@ -69,6 +69,9 @@ pip install -r requirements.txt
 
 #### B. 本機語言模型（llama-server）
 
+> 第一次設定的話，照 `docs/VERIFY_DUAL_BACKEND.md` 的「B-0. 準備本機模型服務」一步一步做：
+> 先檢查有沒有現成的 Ollama、依顯存選模型、去哪裡下載 llama-server 與模型、怎麼確認啟動成功。
+
 本程式不會幫你啟動、安裝或下載任何模型；請自己先啟動一個 `llama-server`（llama.cpp 的
 伺服器程式，可以從 llama.cpp 的 GitHub Releases 下載 Windows CUDA 版），載入 GGUF 模型：
 

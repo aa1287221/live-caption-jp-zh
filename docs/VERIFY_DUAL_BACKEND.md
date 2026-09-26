@@ -46,26 +46,79 @@ python -m unittest discover -s tests
 
 ### B. 本機語言模型
 
-1. 下載 llama.cpp 的 Windows CUDA 版 `llama-server`，準備一個通用指令模型 GGUF
-   （要跟 Gemini 一樣看上下文、校正潤稿，建議 Qwen2.5-14B-Instruct Q4_K_M，約 9 GB 顯存）
-2. 另開一個視窗啟動：
-   ```bash
-   llama-server -m Qwen2.5-14B-Instruct-Q4_K_M.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ngl 99
-   ```
-   （已經有 Ollama + qwen2.5:14b 的話也可以：`$env:LOCAL_LLM_BASE_URL="http://127.0.0.1:11434"`、`$env:LOCAL_LLM_MODEL="qwen2.5:14b"`）
-3. 先檢查服務介面：
+> Gemini 模式不需要下面任何東西；只有要測本機模式才需要準備。
+
+#### B-0. 準備本機模型服務（照順序做，做完一條就可以跳到 B-1）
+
+**步驟 1：先看有沒有現成的 Ollama（有的話最省事，不用下載 llama-server）**
+
+```powershell
+ollama list
+```
+
+如果清單裡有 `qwen2.5:14b`（本專案 `live_caption.py` 原本就是用它），直接設定環境變數，跳到 B-1：
+
+```powershell
+$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434"
+$env:LOCAL_LLM_MODEL = "qwen2.5:14b"
+$env:LLAMA_SERVER_URL = "http://127.0.0.1:11434"   # 給 B-1 的介面檢查用
+```
+
+有 Ollama 但沒有這個模型：`ollama pull qwen2.5:14b`（約 9 GB）。沒有 Ollama 就繼續步驟 2。
+
+**步驟 2：選模型**（看你要驗證什麼）
+
+| 目的 | 模型 | 顯存（約） | 會跑成的模式 |
+| --- | --- | --- | --- |
+| **驗證「跟 Gemini 一樣看上下文、校正、潤稿」**（這個 PR 的重點，建議） | Qwen2.5-14B-Instruct，Q4_K_M | 9 GB | instruct（與 Gemini 相同提示詞） |
+| 顯存不夠（14B 跟 Whisper 一起放不下）時的替代 | Qwen2.5-7B-Instruct，Q4_K_M | 5 GB | instruct |
+| 低顯存、只要逐句翻譯 | Riva-Translate-4B-Instruct-v2，Q4_K_M | 3 GB | riva（逐句、不看上下文、不潤稿，**不適合拿來驗證「不低於 Gemini」**） |
+
+- 16 GB 顯卡要跟 Whisper large-v3-turbo（約 2～3 GB）共用；14B + `-c 8192` 大約用掉 13 GB，放得下。
+- 程式會自動判斷模式：檔名或模型名稱含 `riva` 就是 riva 模式，其他是 instruct 模式，不用另外設定。
+
+**步驟 3：下載 GGUF 模型檔**
+
+到 Hugging Face 搜尋 `Qwen2.5-14B-Instruct-GGUF`（例如 `bartowski/Qwen2.5-14B-Instruct-GGUF`，
+或 Qwen 官方的 `Qwen/Qwen2.5-14B-Instruct-GGUF`），下載 **Q4_K_M** 那個檔案，檔名以頁面為準。
+官方版如果把檔案切成 `-00001-of-0000N.gguf` 好幾份，全部下載放同一個資料夾，啟動時 `-m` 指向第 1 份即可。
+建議放在固定位置，例如 `C:\llm\models\`。
+
+**步驟 4：下載 llama-server**
+
+1. 到 llama.cpp 的 GitHub Releases（https://github.com/ggml-org/llama.cpp/releases）最新版本
+2. 下載檔名含 **`win-cuda`** 的 zip；RTX 50 系列選 CUDA 版本最新的那組（12.8 以上）。
+   同一頁如果有 `cudart-...-win-cuda-....zip`，也一起下載
+3. 全部解壓到同一個資料夾，例如 `C:\llm\llama.cpp\`，裡面有 `llama-server.exe`，不需要安裝
+
+**步驟 5：啟動服務**（另開一個 PowerShell 視窗，測試期間不要關）
+
+```powershell
+cd C:\llm\llama.cpp
+.\llama-server.exe -m C:\llm\models\Qwen2.5-14B-Instruct-Q4_K_M.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ngl 99
+```
+
+- 視窗訊息裡應該看到模型層數被放上 GPU（`offloaded ... layers to GPU` 之類）；如果都在 CPU 上，
+  通常是下載成非 CUDA 版，或 cudart 沒有一起解壓
+- 用瀏覽器打開 http://127.0.0.1:8766/health ，看到 `{"status":"ok"}` 就是準備好了
+  （剛啟動時顯示 `Loading model` 是正常的，等一下）
+- 顯存不足（out of memory）：改用 7B 模型，或把 `-c 8192` 降到 `-c 4096`
+
+#### B-1. 驗證
+
+1. 先檢查服務介面（用 Ollama 的話網址換成 `http://127.0.0.1:11434`）：
    ```powershell
    $env:LLAMA_SERVER_URL = "http://127.0.0.1:8766"
    python -m unittest discover -s tests -p test_llama_server_live.py -v
    ```
    預期 4 個測試 OK
-4. `python live_caption_gemini.py`，「⑥ 翻譯引擎」選 **本機語言模型**，終端機應該印出
+2. `python live_caption_gemini.py`，「⑥ 翻譯引擎」選 **本機語言模型**，終端機應該印出
    `本機模型模式：instruct（與 Gemini 相同的提示詞與流程）` 與暖機結果
-5. 重做 A 的步驟 4、5，確認字幕與兩份整理稿都有產生
-6. 失敗情境：
+3. 重做 A 的步驟 4、5，確認字幕與兩份整理稿都有產生
+4. 失敗情境：
    - 關掉 llama-server 再啟動程式 → 應該在動到音訊設定前就顯示「無法使用本機語言模型」並結束
    - 錄製中途關掉 llama-server → 字幕變空白但不會卡住；結束後顯示「已保留完整錄音」，WAV 沒被刪
-7. 預先轉錄：`python transcribe_audio_file.py 音檔.mp3 --backend local`，再用「讀取預先轉錄字幕檔」播放
+5. 預先轉錄：`python transcribe_audio_file.py 音檔.mp3 --backend local`，再用「讀取預先轉錄字幕檔」播放
 
 ### C. 品質是否「不低於 Gemini」（最重要的判斷依據）
 
@@ -92,7 +145,11 @@ python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.tx
 >    `GeminiPathTests` 與 `PromptParityTests` 就是在鎖這件事。
 > 3. 確認 #2 的修正（刪除重複的 `DelayedAudioPlayer.stop()`）在四個 `live_caption*.py` 都在。
 > 4. 檢查 `local_llm.py`、`local_translation.py`：只用標準函式庫、不會啟動或下載任何東西、錯誤訊息不含 prompt 或模型輸出。
-> 5. 如果這台電腦有正在跑的 llama-server：設定 `LLAMA_SERVER_URL` 跑 `tests/test_llama_server_live.py`，
+> 5. 本機模型環境：先檢查 `ollama list`、`where.exe llama-server`、`nvidia-smi`（顯存）。
+>    缺什麼就依「B-0. 準備本機模型服務」的順序告訴維護者要準備什麼，並依顯存從步驟 2 的表格推薦模型；
+>    要驗證「不低於 Gemini」請推薦通用指令模型（Qwen2.5-14B-Instruct），不要推薦 Riva-Translate。
+>    下載數 GB 的模型或執行檔前先徵求維護者同意；不要修改這個 repo 的程式來遷就環境。
+>    如果這台電腦有正在跑的 llama-server（或 Ollama）：設定 `LLAMA_SERVER_URL` 跑 `tests/test_llama_server_live.py`，
 >    再用 `compare_translation_backends.py --backends local` 跑一份樣本當 smoke test。
 >    如果也有 Gemini 金鑰，跑 `compare_translation_backends.py 樣本 --judge`，把報告的結論（PASS/FAIL 與各項數字）回報。
 > 6. 你無法代替維護者驗證 Windows 的畫面擷取、延遲播放與音訊；請把「二、Windows 實機驗證」列成清單請維護者勾選，
