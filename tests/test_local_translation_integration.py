@@ -299,9 +299,35 @@ class LocalBackendTests(TranslationBackendTestCase):
 		client = ScriptedClient(lambda s, u: "")
 		client.ensure_ready = mock.Mock(side_effect=LocalLLMError("本機模型連線失敗", retryable=True, kind="connection"))
 		factory = lambda **kwargs: LocalTranslationEngine(client, startup_wait=0, log=lambda *_: None, **kwargs)
-		with mock.patch.object(self.app, "LocalTranslationEngine", factory):
+		# Patched so this test's outcome never depends on a developer's own untracked
+		# local_llm_server.json / LOCAL_LLM_* env vars actually present on this machine.
+		with mock.patch.object(self.app, "LocalTranslationEngine", factory), \
+				mock.patch.object(self.app, "ensure_llama_server", return_value=None):
 			with self.assertRaisesRegex(RuntimeError, "llama-server[\\s\\S]*Gemini API"):
 				self.app.Translator("local")
+
+	def test_unreachable_local_service_without_model_path_gets_autostart_hint(self):
+		client = ScriptedClient(lambda s, u: "")
+		client.ensure_ready = mock.Mock(side_effect=LocalLLMError("本機模型連線失敗", retryable=True, kind="connection"))
+		factory = lambda **kwargs: LocalTranslationEngine(client, startup_wait=0, log=lambda *_: None, **kwargs)
+		with mock.patch.object(self.app, "LocalTranslationEngine", factory), \
+				mock.patch.object(self.app, "ensure_llama_server", return_value=None) as spy:
+			with self.assertRaisesRegex(RuntimeError, "llama-server[\\s\\S]*Gemini API[\\s\\S]*LOCAL_LLM_MODEL_PATH"):
+				self.app.Translator("local")
+		spy.assert_called_once_with(client)
+
+	def test_configured_but_broken_local_service_reports_the_specific_reason_without_generic_wrapper(self):
+		from llama_server import LlamaServerError
+
+		client = ScriptedClient(lambda s, u: "")
+		factory = lambda **kwargs: LocalTranslationEngine(client, startup_wait=0, log=lambda *_: None, **kwargs)
+		with mock.patch.object(self.app, "LocalTranslationEngine", factory), \
+				mock.patch.object(self.app, "ensure_llama_server", side_effect=LlamaServerError("找不到模型檔：C:\\models\\missing.gguf")):
+			with self.assertRaises(RuntimeError) as caught:
+				self.app.Translator("local")
+		message = str(caught.exception)
+		self.assertIn("找不到模型檔", message)
+		self.assertNotIn("請先啟動 llama-server 並載入模型", message)
 
 	def test_local_live_caption_repairs_bad_reply(self):
 		replies = iter(["今日はいい天気ですね。", "今天天氣真好呢。"])
@@ -356,6 +382,34 @@ class LocalBackendTests(TranslationBackendTestCase):
 		self.assertTrue(all(cue["zh"] for cue in cues))
 		self.assertEqual(cues[2]["zh"], "中文日文2です。")
 		self.assertEqual(self.sleeps, [])
+
+
+class WhisperModelConfigTests(TranslationBackendTestCase):
+	def test_cuda_default_is_large_v3(self):
+		self.assertEqual(self.app.resolve_whisper_model_size(True, environ={}), "large-v3")
+
+	def test_cpu_default_is_small(self):
+		self.assertEqual(self.app.resolve_whisper_model_size(False, environ={}), "small")
+
+	def test_whisper_model_env_overrides_both_cuda_and_cpu_defaults(self):
+		self.assertEqual(self.app.resolve_whisper_model_size(True, environ={"WHISPER_MODEL": "medium"}), "medium")
+		self.assertEqual(self.app.resolve_whisper_model_size(False, environ={"WHISPER_MODEL": " large-v3-turbo "}), "large-v3-turbo")
+
+	def test_blank_env_value_falls_back_to_the_cuda_cpu_default(self):
+		self.assertEqual(self.app.resolve_whisper_model_size(True, environ={"WHISPER_MODEL": "   "}), "large-v3")
+
+
+class GlossaryFileTests(TranslationBackendTestCase):
+	def test_load_glossary_recreates_the_default_file_when_missing(self):
+		# glossary.json is now gitignored (a user's own list should not conflict with git
+		# pull); a fresh clone must still work by falling back to _DEFAULT_GLOSSARY.
+		with tempfile.TemporaryDirectory() as temp_dir:
+			missing_path = Path(temp_dir) / "glossary.json"
+			with mock.patch.object(self.app, "GLOSSARY_PATH", missing_path):
+				glossary = self.app.load_glossary()
+			self.assertEqual(glossary, self.app._DEFAULT_GLOSSARY)
+			self.assertTrue(missing_path.exists())
+			self.assertEqual(json.loads(missing_path.read_text(encoding="utf-8")), self.app._DEFAULT_GLOSSARY)
 
 
 class WorkflowWiringTests(TranslationBackendTestCase):

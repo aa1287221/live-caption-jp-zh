@@ -111,6 +111,7 @@ from PIL import Image, ImageTk
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
 from local_translation import LocalTranslationEngine
+from llama_server import LlamaServerError, ensure_llama_server
 
 # The Gemini SDK is imported only when the Gemini backend is chosen, so local-model
 # users do not need google-genai installed.
@@ -140,9 +141,20 @@ else:
     print("未偵測到可用的 CUDA GPU，將使用 CPU（速度會慢很多）。")
 
 # ---------- 可調參數 ----------
-# large-v3-turbo：實測 WER/CER 比 medium 準不少，速度因為有 turbo 優化，
-# 不會比 medium 慢多少，5060 Ti 的 VRAM 跑起來沒問題。
-WHISPER_MODEL_SIZE = "large-v3-turbo" if _CUDA_OK else "small"
+def resolve_whisper_model_size(cuda_available: bool, environ: dict | None = None) -> str:
+    """WHISPER_MODEL env override > CUDA/CPU default.
+
+    large-v3-turbo 在有雜音的直播片段上會出現重複片語與罐頭字句的幻覺，實測 large-v3
+    沒有這個問題（p50 每句 0.32 秒，可接受）；CPU 沒有這個問題所以維持較小的 small。
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get("WHISPER_MODEL")
+    if override and override.strip():
+        return override.strip()
+    return "large-v3" if cuda_available else "small"
+
+
+WHISPER_MODEL_SIZE = resolve_whisper_model_size(_CUDA_OK)
 WHISPER_DEVICE = "cuda" if _CUDA_OK else "cpu"
 WHISPER_COMPUTE_TYPE = "float16" if _CUDA_OK else "int8"
 WHISPER_BEAM_SIZE = 5             # 用 beam search 選最佳辨識結果，GPU 才有餘裕開這個
@@ -163,7 +175,7 @@ TRANSLATION_BACKEND_LOCAL = "local"
 TRANSLATION_BACKENDS = (TRANSLATION_BACKEND_GEMINI, TRANSLATION_BACKEND_LOCAL)
 TRANSLATION_BACKEND_LABELS = {
     TRANSLATION_BACKEND_GEMINI: "Gemini API（雲端，需要 API 金鑰）",
-    TRANSLATION_BACKEND_LOCAL: "本機語言模型（llama-server，需先自行啟動，不需要金鑰）",
+    TRANSLATION_BACKEND_LOCAL: "本機語言模型（llama-server，設定好會自動啟動，不需要金鑰）",
 }
 
 TARGET_SR = 16000                 # Whisper / VAD / 延遲音訊緩衝區使用的取樣率
@@ -1369,15 +1381,25 @@ class Translator:
         self.local = None
         if self.backend == TRANSLATION_BACKEND_LOCAL:
             self.client = None
+            self.llama_server = None
             try:
                 self.local = LocalTranslationEngine(postprocess=_collapse_repetition)
+                # 只有在沒有任何服務回應、且設定了 model_path 時才會真的啟動子行程；
+                # 已有服務在跑（Ontime/Ollama/自己手動啟動）一律原樣使用，不會被停掉。
+                self.llama_server = ensure_llama_server(self.local.client)
                 warmup_system, warmup_user = _context_prompts("", "こんにちは。", None)
                 self.local.prepare(warmup_system, warmup_user, "こんにちは。")
+            except LlamaServerError as e:
+                # 這是自動啟動設定本身的問題（路徑找不到、網址不是本機等），訊息已經
+                # 講清楚原因，不用再套一層「請先手動啟動」的樣板文字。
+                raise RuntimeError(str(e)) from e
             except RuntimeError as e:
                 raise RuntimeError(
                     f"無法使用本機語言模型：{e}\n"
                     "請先啟動 llama-server 並載入模型（見 README「本機語言模型」），確認 LOCAL_LLM_BASE_URL"
-                    "（預設 http://127.0.0.1:8766）設定正確，或在啟動畫面改選 Gemini API。"
+                    "（預設 http://127.0.0.1:8766）設定正確，或在啟動畫面改選 Gemini API。\n"
+                    "提示：設定 LOCAL_LLM_MODEL_PATH（或 local_llm_server.json）可以讓本程式自動啟動"
+                    "llama-server，不用自己先手動啟動（見 README）。"
                 ) from e
             return
 
