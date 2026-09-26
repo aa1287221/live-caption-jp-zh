@@ -74,7 +74,9 @@ $env:LLAMA_SERVER_URL = "http://127.0.0.1:11434"   # 給 B-1 的介面檢查用
 | 顯存不夠（14B 跟 Whisper 一起放不下）時的替代 | Qwen2.5-7B-Instruct，Q4_K_M | 5 GB | instruct |
 | 低顯存、只要逐句翻譯 | Riva-Translate-4B-Instruct-v2，Q4_K_M | 3 GB | riva（逐句、不看上下文、不潤稿，**不適合拿來驗證「不低於 Gemini」**） |
 
-- 16 GB 顯卡要跟 Whisper large-v3-turbo（約 2～3 GB）共用；14B + `-c 8192` 大約用掉 13 GB，放得下。
+- 16 GB 顯卡要跟 Whisper 共用；GPU 預設模型現在是 `large-v3`（約 3 GB，比 turbo 準，實測沒有
+  turbo 在雜音片段常見的幻聽問題）。想省一點顯存/下載量，設定 `WHISPER_MODEL=large-v3-turbo`
+  （約 1.5～2 GB）。14B + `-c 8192` 大約用掉 13 GB，跟 large-v3 一起放得下。
 - 程式會自動判斷模式：檔名或模型名稱含 `riva` 就是 riva 模式，其他是 instruct 模式，不用另外設定。
 
 **步驟 3：下載 GGUF 模型檔**

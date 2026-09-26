@@ -193,7 +193,9 @@ python live_caption_gemini.py
 
 - 翻譯引擎會在開始擷取前先確認可用（Gemini 金鑰、本機模型服務連線與暖機），
   有問題會直接顯示原因並結束，不會動到你的音訊設定
-- 第一次執行會自動下載 Whisper 語音辨識模型跟 Silero VAD（共約 1.5GB）
+- 第一次執行會自動下載 Whisper 語音辨識模型跟 Silero VAD；GPU 預設模型是 `large-v3`
+  （約 3GB），CPU 預設是 `small`（小很多）；想要下載量小一點，設定
+  `WHISPER_MODEL=large-v3-turbo`（約 1.5GB，但實測在有雜音的片段容易有幻聽問題，見上方說明）
 - 逐字稿即時存到 `transcripts/transcript_YYYYMMDD_HHMMSS.txt`
 - 結束播放後自動整理成方便閱讀的 `transcript_YYYYMMDD_HHMMSS_polished.md`
 - 若曾開始錄製，結束後會用完整錄音重新辨識+翻譯，產生 `transcript_YYYYMMDD_HHMMSS_notebooklm_style.md`，

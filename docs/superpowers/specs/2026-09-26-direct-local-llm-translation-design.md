@@ -29,6 +29,11 @@ The only external prerequisite is a user-started local inference service with
 the loaded local model. The service URL is configured by this application,
 not inferred from an Ontime installation.
 
+> **Superseded (start/stop only):** the "user-started" clause above is superseded by
+> `2026-09-26-managed-llama-server-design.md`, which has the app start/stop a
+> `llama-server` it spawned itself when nothing answers the configured base URL. An
+> already-running service is still always used as-is and never touched.
+
 ## Local inference contract
 
 `local_llm.py` owns a standard-library HTTP client. Its primary operation is
