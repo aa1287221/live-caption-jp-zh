@@ -86,6 +86,12 @@ def download_file(
 	against the GitHub release CDN). A stall or dropped connection is retried up to
 	``max_attempts`` times with a short backoff, resuming from ``.part`` each time; on final
 	failure ``.part`` is kept (never deleted) so simply re-running the script resumes it.
+
+	A ``.part`` that already verifies (a previous run finished writing it but crashed
+	before the rename) is used immediately, without any network request. HTTP 416 (the
+	server saying our resume offset is already past the end -- an unverifiable, stale
+	``.part``) drops it and restarts fresh instead of repeating the same failing Range
+	request forever. HTTP 401/403/404 fail immediately: no retry will ever fix those.
 	"""
 	dest.parent.mkdir(parents=True, exist_ok=True)
 	if verify_existing(dest, expected_sha256):
@@ -93,6 +99,11 @@ def download_file(
 			on_progress(dest.name, "skip", 0, 0)
 		return
 	part = dest.with_name(dest.name + ".part")
+	if part.is_file() and sha256_of_file(part) == expected_sha256:
+		part.replace(dest)
+		if on_progress:
+			on_progress(dest.name, "skip", 0, 0)
+		return
 
 	last_error = None
 	for attempt in range(1, max_attempts + 1):
@@ -102,6 +113,17 @@ def download_file(
 			request.add_header("Range", f"bytes={resume_from}-")
 		try:
 			response = urlopen(request, timeout=timeout)
+		except urllib.error.HTTPError as error:
+			if error.code in (401, 403, 404):
+				raise RuntimeError(
+					f"下載失敗（HTTP {error.code}）：{url}\n"
+					"這類錯誤重試也不會成功，請確認網址是否正確、是否需要授權。"
+				) from error
+			if error.code == 416 and part.exists():
+				# .part didn't verify above, and the server now says our resume offset is
+				# at or past its end -- it's stale/corrupt, not something we can resume.
+				part.unlink(missing_ok=True)
+			last_error = error
 		except urllib.error.URLError as error:
 			last_error = error
 		else:
@@ -194,7 +216,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 	parser.add_argument("--model-filename", default=None, help="模型存檔檔名（預設從網址推斷）")
 	parser.add_argument("--server-args", default=None, help="寫入 local_llm_server.json 的 server_args；不指定就保留原有設定或用預設值")
 	parser.add_argument("--dest", default=None, help="程式資料夾（預設是這支腳本所在的資料夾）")
-	return parser.parse_args(argv)
+	args = parser.parse_args(argv)
+	if args.model_url != DEFAULT_MODEL_URL and args.model_sha256 == DEFAULT_MODEL_SHA256:
+		# 換了模型網址卻沿用預設模型的 sha256，驗證一定會失敗（而且是誤導人的失敗方式）；
+		# 在這裡直接擋下來，比讓它跑到下載完才報 sha256 不符更清楚。
+		parser.error("換了 --model-url 就必須同時指定對應的 --model-sha256，不能沿用預設模型的 sha256。")
+	return args
 
 
 def _print_progress(name: str, phase: str, written: int, total: int) -> None:

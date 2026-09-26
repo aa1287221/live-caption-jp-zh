@@ -8,6 +8,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -220,6 +221,67 @@ class DownloadStallAndRetryTests(unittest.TestCase):
 			self.assertEqual(part.read_bytes(), b"abcde")
 			for call in opener.call_args_list:
 				self.assertIn("timeout", call.kwargs)
+
+
+class M8ResumeAndFailureModeTests(unittest.TestCase):
+	"""M8: a .part that is already the whole file must not loop on HTTP 416 forever, and
+	permanent HTTP errors (401/403/404) must fail immediately instead of retrying."""
+
+	def test_part_that_already_verifies_is_renamed_without_touching_the_network(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			dest = Path(tmp) / "file.bin"
+			part = dest.with_name(dest.name + ".part")
+			body = b"already-complete-content"
+			part.write_bytes(body)
+			expected = hashlib.sha256(body).hexdigest()
+			opener = mock.Mock(side_effect=AssertionError("should not touch the network"))
+			setup.download_file("http://example.test/file.bin", dest, expected, urlopen=opener)
+			opener.assert_not_called()
+			self.assertEqual(dest.read_bytes(), body)
+			self.assertFalse(part.exists())
+
+	def test_416_on_a_stale_part_deletes_it_and_restarts_fresh_instead_of_looping(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			dest = Path(tmp) / "file.bin"
+			part = dest.with_name(dest.name + ".part")
+			part.write_bytes(b"corrupted-leftover-same-length-ish")  # does not verify
+			full = b"correct-fresh-full-body"
+			expected = hashlib.sha256(full).hexdigest()
+			error_416 = urllib.error.HTTPError("http://example.test/file.bin", 416, "Range Not Satisfiable", {}, None)
+			opener = mock.Mock(side_effect=[error_416, FakeResponse(full, status=200)])
+			sleeps = []
+			setup.download_file(
+				"http://example.test/file.bin", dest, expected,
+				urlopen=opener, sleep=sleeps.append,
+			)
+			self.assertEqual(dest.read_bytes(), full)
+			self.assertEqual(opener.call_count, 2)
+			second_request = opener.call_args_list[1][0][0]
+			self.assertIsNone(second_request.get_header("Range"), "stale .part must be dropped, not resumed from")
+
+	def test_401_403_404_fail_immediately_without_retrying(self):
+		for status in (401, 403, 404):
+			with self.subTest(status=status):
+				with tempfile.TemporaryDirectory() as tmp:
+					dest = Path(tmp) / "file.bin"
+					error = urllib.error.HTTPError("http://example.test/file.bin", status, "denied", {}, None)
+					opener = mock.Mock(side_effect=error)
+					with self.assertRaises(RuntimeError) as caught:
+						setup.download_file("http://example.test/file.bin", dest, "0" * 64, urlopen=opener, sleep=lambda _: None)
+					self.assertIn(str(status), str(caught.exception))
+					self.assertEqual(opener.call_count, 1, "must not retry a permanent HTTP error")
+
+	def test_model_sha256_is_required_when_model_url_is_overridden(self):
+		with self.assertRaises(SystemExit):
+			setup.parse_args(["--model-url", "http://example.test/other-model.gguf"])
+
+	def test_model_sha256_alongside_model_url_is_accepted(self):
+		args = setup.parse_args(["--model-url", "http://example.test/other-model.gguf", "--model-sha256", "a" * 64])
+		self.assertEqual(args.model_url, "http://example.test/other-model.gguf")
+
+	def test_default_model_url_and_sha256_together_are_still_fine(self):
+		args = setup.parse_args([])  # neither flag given: the matched default pair
+		self.assertEqual((args.model_url, args.model_sha256), (setup.DEFAULT_MODEL_URL, setup.DEFAULT_MODEL_SHA256))
 
 
 class ExtractZipTests(unittest.TestCase):
