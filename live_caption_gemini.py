@@ -91,6 +91,7 @@ import ctypes
 import queue
 import threading
 import multiprocessing
+from multiprocessing import shared_memory
 import datetime
 import wave
 from collections import deque
@@ -805,9 +806,18 @@ class ScreenCapture:
     跟語音辨識/翻譯/UI 擠在一起搶執行權，就是隨機雜音/卡頓的來源。獨立行程
     有自己的直譯器和 GIL，兩邊真正並行、不會互搶，才是治本的做法。
 
+    畫面資料改用共享記憶體傳回主行程，不是 multiprocessing.Queue：Queue 要
+    pickle 序列化、複製進系統管道，1920 寬、60fps 的資料量（一秒幾百 MB）
+    撐不住，會掉幀、卡頓；共享記憶體是直接讀寫同一塊記憶體，沒有序列化/複製
+    的成本。用 3 個輪替緩衝格（見 screen_capture_worker.NUM_SLOTS），寫入端
+    寫完整格才更新「最新是哪一格」的索引，讀取端只讀完整寫完的那一格，繞一圈
+    回來蓋掉同一格之前，讀取端早就複製走了，不用額外加鎖。
+
     對外行為跟原本的執行緒版本完全一樣：start()/stop()/switch_window()，
     呼叫端不用改。
     """
+
+    NUM_SLOTS = 3
 
     def __init__(
         self,
@@ -825,9 +835,19 @@ class ScreenCapture:
         # HWND 用 signed 64-bit 存，Windows 上視窗代碼本質是指標大小的值，
         # 用 32-bit 存在少數情況下可能裝不下
         self._hwnd_shared = multiprocessing.Value(ctypes.c_longlong, hwnd)
-        # maxsize 故意設小：主行程來不及消化時，擷取行程那邊會直接丟棄新畫面
-        # （見 screen_capture_worker.py），佇列不會無限累積、畫面延遲不會越拖越長
-        self._frame_queue: "multiprocessing.Queue" = multiprocessing.Queue(maxsize=4)
+
+        # 每一格的容量保守抓「寬 x 寬」的正方形上限（一般影片視窗高度不會超過
+        # 寬度），RGB 3 bytes/像素；真的遇到更高的畫面，擷取行程那邊會跳過
+        # 那一張並印出警告，不會寫爆記憶體
+        self._slot_nbytes = max_width * max_width * 3
+        self._shm = shared_memory.SharedMemory(create=True, size=self._slot_nbytes * self.NUM_SLOTS)
+        self._shm_view = np.ndarray(
+            (self.NUM_SLOTS, self._slot_nbytes), dtype=np.uint8, buffer=self._shm.buf
+        )
+        # 每格存 (height, width, timestamp) 三個值
+        self._meta = multiprocessing.Array(ctypes.c_double, self.NUM_SLOTS * 3)
+        self._latest_slot = multiprocessing.Value(ctypes.c_int, -1)  # -1 = 還沒有任何畫面
+
         self._stop_event = multiprocessing.Event()
         self._pause_event = multiprocessing.Event()
         self._process: "multiprocessing.Process | None" = None
@@ -841,20 +861,21 @@ class ScreenCapture:
             target=run_capture_process,
             args=(
                 self._hwnd_shared, self.max_width, self.target_fps,
-                self._frame_queue, self._stop_event, self._pause_event,
+                self._shm.name, self._slot_nbytes, self._meta,
+                self._latest_slot, self._stop_event, self._pause_event,
             ),
             daemon=True,
         )
         self._process.start()
 
         # 擷取行程只負責產生畫面，真正寫進 FrameBuffer 這件事在主行程這邊一條
-        # 很輕量的執行緒做（只是從佇列拿現成資料塞進去，幾乎不耗 CPU），
-        # 這樣 frame_buffer 這個物件完全不用改，其他地方也不用知道畫面是
-        # 從哪裡來的
+        # 很輕量的執行緒做（只是複製現成資料塞進去，幾乎不耗 CPU），這樣
+        # frame_buffer 這個物件完全不用改，其他地方也不用知道畫面是從哪裡來的
         self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
         self._receiver_thread.start()
 
     def _receive_loop(self):
+        last_seen = -1
         while not self._receiver_stop.is_set():
             # 把主行程這邊的暫停旗標同步給擷取行程，按暫停時畫面擷取才會一起停
             if self.pause_state is not None:
@@ -862,13 +883,20 @@ class ScreenCapture:
                     self._pause_event.set()
                 else:
                     self._pause_event.clear()
-            try:
-                ts, rgb = self._frame_queue.get(timeout=0.2)
-            except queue.Empty:
+
+            slot = self._latest_slot.value
+            if slot == -1 or slot == last_seen:
+                time.sleep(0.005)
                 continue
-            except (EOFError, OSError):
-                break
-            self.frame_buffer.push(ts, rgb)
+            last_seen = slot
+
+            idx = slot * 3
+            h = int(self._meta[idx])
+            w = int(self._meta[idx + 1])
+            ts = self._meta[idx + 2]
+            nbytes = h * w * 3
+            frame = self._shm_view[slot, :nbytes].reshape(h, w, 3).copy()
+            self.frame_buffer.push(ts, frame)
 
     def switch_window(self, hwnd: int):
         """切換擷取目標到另一個視窗，執行中隨時可以呼叫，下一次擷取就會生效"""
@@ -883,6 +911,8 @@ class ScreenCapture:
                 self._process.terminate()
         if self._receiver_thread is not None:
             self._receiver_thread.join(timeout=1.0)
+        self._shm.close()
+        self._shm.unlink()
 
 
 class DelayedAudioPlayer:
