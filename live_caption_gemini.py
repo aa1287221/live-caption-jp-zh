@@ -1,7 +1,11 @@
 """
 live_caption_gemini.py
-跟 live_caption.py 完全一樣的內建擷取版，唯一差別：翻譯改呼叫 Gemini API
-（gemini-2.5-flash-lite）取代本機 Ollama，拿來測試雲端翻譯品質好不好用。
+跟 live_caption.py 完全一樣的內建擷取版，翻譯引擎可以在啟動畫面「⑥ 翻譯引擎」選：
+  - Gemini API（預設，GEMINI_MODEL）：雲端翻譯，需要 API 金鑰，行為跟以前完全一樣
+  - 本機語言模型：呼叫你自己先啟動的 llama-server（或 Ollama 等 OpenAI 相容服務），
+    不需要金鑰、不用額度、逐字稿不會離開你的電腦；送出的提示詞、前一句上下文、
+    事後重新辨識+潤稿、預先轉錄的流程都跟 Gemini 版相同（設定方式見下方與 README）
+檔名保留 gemini，既有的捷徑、啟動器、transcribe_audio_file.py 都不用改。
 
 使用情境：
   你是合法訂閱會員，在瀏覽器裡播放影片。這支程式只會擷取你電腦上「你自己選定的
@@ -28,6 +32,14 @@ live_caption_gemini.py
 
     免費額度大約：gemini-2.5-flash-lite 每天 1,000 次、每分鐘 15 次請求，
     大概夠一天看一集左右的節目份量，實際額度以 Google 官方頁面當下顯示為準。
+
+    改用本機語言模型的話（不需要金鑰、不用 google-genai）：先在另一個視窗啟動
+    llama-server 並載入模型，例如：
+        llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -ngl 99
+    再到啟動畫面把「⑥ 翻譯引擎」選成本機語言模型（會記住上次的選擇）。
+    服務網址不是 http://127.0.0.1:8766 的話，用環境變數 LOCAL_LLM_BASE_URL 指定。
+    想要跟 Gemini 一樣會看上下文、會校正辨識錯字的效果，請載入通用指令模型
+    （例如 Qwen2.5-14B-Instruct）；Riva-Translate 這類翻譯專用模型會自動改成逐句翻譯。
 
 執行：
     python live_caption_gemini.py
@@ -97,9 +109,27 @@ from PIL import Image, ImageTk
 
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
-from google import genai
-from google.genai import types as genai_types
-from google.genai import errors as genai_errors
+from local_translation import LocalTranslationEngine
+
+# The Gemini SDK is imported only when the Gemini backend is chosen, so local-model
+# users do not need google-genai installed.
+genai = None
+genai_types = None
+genai_errors = None
+
+
+def _import_gemini_sdk():
+	global genai, genai_types, genai_errors
+	if genai is None:
+		try:
+			from google import genai as sdk
+			from google.genai import types as sdk_types
+			from google.genai import errors as sdk_errors
+		except ImportError as error:
+			raise RuntimeError(
+				"找不到 google-genai 套件：請執行 pip install google-genai，或在啟動畫面改選本機語言模型。"
+			) from error
+		genai, genai_types, genai_errors = sdk, sdk_types, sdk_errors
 
 # ---------- 硬體自動偵測 (5800X3D + RTX 5060 Ti 會自動吃 GPU) ----------
 _CUDA_OK = torch.cuda.is_available()
@@ -123,6 +153,17 @@ WHISPER_BEAM_SIZE = 5             # 用 beam search 選最佳辨識結果，GPU 
 # （給雙擊 exe 這種沒有終端機可以先設環境變數的用法）。兩種都不寫死在程式碼裡。
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 GEMINI_API_KEY_FILE = Path(__file__).parent / "gemini_api_key.txt"
+
+# 翻譯引擎：gemini（預設，跟以前一樣）或 local（本機語言模型，見檔案開頭說明）。
+# 啟動畫面會記住上次的選擇；環境變數 TRANSLATION_BACKEND 可以指定預設值，
+# transcribe_audio_file.py 也吃同一個環境變數（或用 --backend 參數）。
+TRANSLATION_BACKEND_GEMINI = "gemini"
+TRANSLATION_BACKEND_LOCAL = "local"
+TRANSLATION_BACKENDS = (TRANSLATION_BACKEND_GEMINI, TRANSLATION_BACKEND_LOCAL)
+TRANSLATION_BACKEND_LABELS = {
+    TRANSLATION_BACKEND_GEMINI: "Gemini API（雲端，需要 API 金鑰）",
+    TRANSLATION_BACKEND_LOCAL: "本機語言模型（llama-server，需先自行啟動，不需要金鑰）",
+}
 
 TARGET_SR = 16000                 # Whisper / VAD / 延遲音訊緩衝區使用的取樣率
 VAD_CHUNK_SAMPLES = 512           # Silero VAD 在 16kHz 下要求的固定窗格大小 (32ms)
@@ -354,6 +395,71 @@ def polish_transcript(raw_log_path: Path, paragraph_gap_sec: float = PARAGRAPH_G
 
 _POLISH_CHUNK_LINES = 60  # 事後整理時，每批送幾句給翻譯模型，避免單次回應太長
 
+_REBUILD_SYSTEM_PROMPT = (
+    "你是專業的日文-繁體中文口譯兼編輯。使用者會分批貼上同一集日文廣播/網路節目的"
+    "逐句語音辨識稿（可能有少數同音錯字，請憑上下文合理修正，不要另外編造內容）。"
+    "請針對這一批內容，把每一句翻成自然流暢、口語化的繁體中文，不要逐字直譯。\n"
+    "請忠實呈現內容，不要自己刪減或改寫語氣詞、口頭禪這類東西——錄音裡實際講了"
+    "什麼，就照樣翻出來，不要自己判斷哪些是「贅字」就省略掉。\n"
+    "輸出格式：每句先輸出修正過的日文原句，換行輸出對應的繁體中文翻譯，"
+    "句子之間空一行；只要輸出這些內容，不要加任何額外的說明、前言或標題。"
+)
+
+
+def _rebuild_user_prompt(batch: list[str], context_tail: str) -> str:
+	"""Build the reconstruction batch prompt shared by the Gemini and local backends."""
+	return (
+		(f"（前面幾句當上下文參考，不用重複翻譯：\n{context_tail}\n\n") if context_tail else ""
+	) + "請處理這一批句子：\n" + "\n".join(batch)
+
+
+def _polish_with_gemini(translator: "Translator", ja_lines: list[str], system_prompt: str) -> list[str]:
+    polished_parts = []
+    context_tail = ""
+    total_batches = (len(ja_lines) + _POLISH_CHUNK_LINES - 1) // _POLISH_CHUNK_LINES
+    for batch_no, i in enumerate(range(0, len(ja_lines), _POLISH_CHUNK_LINES), start=1):
+        batch = ja_lines[i:i + _POLISH_CHUNK_LINES]
+        user_prompt = _rebuild_user_prompt(batch, context_tail)
+
+        # 這裡跟即時字幕不一樣：這是背景整理工作，不趕時間，撞到免費額度限制
+        # 的話等久一點重試，把它做完比做快更重要——所以不用 translator._chat
+        # 那個「立刻放棄」的快速失敗邏輯，這裡自己重試
+        result = ""
+        for attempt in range(3):
+            result = translator._chat(system_prompt, user_prompt)
+            if result:
+                break
+            print(f"  第 {batch_no} 批翻譯失敗（可能撞到額度限制），20 秒後重試（第 {attempt + 1} 次）...")
+            time.sleep(20)
+
+        if result:
+            polished_parts.append(result)
+        context_tail = "\n".join(batch[-2:])
+        print(f"  已處理第 {batch_no}/{total_batches} 批")
+
+        if batch_no < total_batches:
+            # 主動放慢節奏，盡量不要撞到免費額度的「每分鐘請求數」上限
+            time.sleep(4.5)
+    return polished_parts
+
+
+def _polish_with_local_model(
+	translator: "Translator",
+	ja_lines: list[str],
+	glossary: dict | None,
+	system_prompt: str,
+) -> list[str] | None:
+	"""Same prompts and output layout as Gemini; batches split and retry on bad replies."""
+	engine = translator.local
+	return engine.polish_bilingual(
+		ja_lines,
+		glossary=glossary,
+		system_prompt=system_prompt,
+		build_user_prompt=_rebuild_user_prompt,
+		context_prompts=lambda prev_ja, current_ja: _context_prompts(prev_ja, current_ja, glossary),
+		progress=lambda batch_no, total: print(f"  已處理第 {batch_no}/{total} 批"),
+	)
+
 
 def rebuild_transcript_from_full_audio(
     wav_path: "Path",
@@ -397,60 +503,43 @@ def rebuild_transcript_from_full_audio(
 
     print(f"重新辨識完成，共 {len(ja_lines)} 句，正在請翻譯模型分批整理成完整逐字稿...")
 
-    system_prompt = (
-        "你是專業的日文-繁體中文口譯兼編輯。使用者會分批貼上同一集日文廣播/網路節目的"
-        "逐句語音辨識稿（可能有少數同音錯字，請憑上下文合理修正，不要另外編造內容）。"
-        "請針對這一批內容，把每一句翻成自然流暢、口語化的繁體中文，不要逐字直譯。\n"
-        "請忠實呈現內容，不要自己刪減或改寫語氣詞、口頭禪這類東西——錄音裡實際講了"
-        "什麼，就照樣翻出來，不要自己判斷哪些是「贅字」就省略掉。\n"
-        "輸出格式：每句先輸出修正過的日文原句，換行輸出對應的繁體中文翻譯，"
-        "句子之間空一行；只要輸出這些內容，不要加任何額外的說明、前言或標題。"
-    )
+    system_prompt = _REBUILD_SYSTEM_PROMPT
     hint = glossary_hint(glossary) if glossary else ""
     if hint:
         system_prompt += "\n" + hint
 
-    polished_parts = []
-    context_tail = ""
-    total_batches = (len(ja_lines) + _POLISH_CHUNK_LINES - 1) // _POLISH_CHUNK_LINES
-    for batch_no, i in enumerate(range(0, len(ja_lines), _POLISH_CHUNK_LINES), start=1):
-        batch = ja_lines[i:i + _POLISH_CHUNK_LINES]
-        user_prompt = (
-            (f"（前面幾句當上下文參考，不用重複翻譯：\n{context_tail}\n\n") if context_tail else ""
-        ) + "請處理這一批句子：\n" + "\n".join(batch)
-
-        # 這裡跟即時字幕不一樣：這是背景整理工作，不趕時間，撞到免費額度限制
-        # 的話等久一點重試，把它做完比做快更重要——所以不用 translator._chat
-        # 那個「立刻放棄」的快速失敗邏輯，這裡自己重試
-        result = ""
-        for attempt in range(3):
-            result = translator._chat(system_prompt, user_prompt)
-            if result:
-                break
-            print(f"  第 {batch_no} 批翻譯失敗（可能撞到額度限制），20 秒後重試（第 {attempt + 1} 次）...")
-            time.sleep(20)
-
-        if result:
-            polished_parts.append(result)
-        context_tail = "\n".join(batch[-2:])
-        print(f"  已處理第 {batch_no}/{total_batches} 批")
-
-        if batch_no < total_batches:
-            # 主動放慢節奏，盡量不要撞到免費額度的「每分鐘請求數」上限
-            time.sleep(4.5)
+    translation_only = False
+    if getattr(translator, "backend", TRANSLATION_BACKEND_GEMINI) == TRANSLATION_BACKEND_LOCAL:
+        translation_only = translator.local.is_translation_only
+        polished_parts = _polish_with_local_model(translator, ja_lines, glossary, system_prompt)
+        if polished_parts is None:
+            # 服務中途停掉：保留完整錄音，之後可以用 transcribe_audio_file.py 重新處理
+            print(f"本機模型服務無法使用，已保留完整錄音：{wav_path}")
+            return None
+    else:
+        polished_parts = _polish_with_gemini(translator, ja_lines, system_prompt)
 
     if not polished_parts:
         print("翻譯模型沒有回傳任何內容，略過這份整理稿。")
         return None
 
+    if translation_only:
+        summary = (
+            "這份逐字稿是結束播放後，用完整錄音重新辨識，再由本機翻譯專用模型逐句翻譯的版本"
+            "（翻譯專用模型不會校正辨識錯字、也不會參考上下文潤稿），內容照實呈現、沒有自己刪減。"
+        )
+    else:
+        summary = (
+            "這份逐字稿是結束播放後，用完整錄音重新辨識、翻譯模型看過完整上下文潤過的版本，"
+            "準確度會比即時觀看時看到的字幕更好，內容照實呈現、沒有自己刪減。"
+        )
     out_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + "_notebooklm_style.md")
     header = [
         f"# {episode_title}" if episode_title else "# 中日對照逐字稿（事後重新辨識版）",
         "",
         f"整理時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "這份逐字稿是結束播放後，用完整錄音重新辨識、翻譯模型看過完整上下文潤過的版本，"
-        "準確度會比即時觀看時看到的字幕更好，內容照實呈現、沒有自己刪減。",
+        summary,
         "",
         "---",
         "",
@@ -948,14 +1037,6 @@ class DelayedAudioPlayer:
             except Exception:
                 pass
 
-    def stop(self):
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-
 
 class AudioCapture(threading.Thread):
     """從系統輸出裝置 (loopback) 擷取音訊：
@@ -1215,16 +1296,62 @@ _SYSTEM_PROMPT_BASE = (
 )
 
 
-class Translator:
-    """呼叫 Gemini API 做翻譯，取代本機 Ollama + Qwen2.5。
+def _context_prompts(prev_ja: str, current_ja: str, glossary: dict | None) -> tuple[str, str]:
+	"""Build the live-caption prompts shared by the Gemini and local backends."""
+	system_prompt = _SYSTEM_PROMPT_BASE
+	hint = glossary_hint(glossary) if glossary else ""
+	if hint:
+		system_prompt += "\n" + hint
+	if prev_ja:
+		user_prompt = f"前一句話（僅供參考上下文，不用翻譯）：\n{prev_ja}\n\n請翻譯這一句：\n{current_ja}"
+	else:
+		user_prompt = f"請翻譯這一句：\n{current_ja}"
+	return system_prompt, user_prompt
 
-    雲端大型模型的語言理解能力比塞得進消費級顯卡的本機模型好上一截，翻起來
-    更自然、更少怪異的字句；代價是要申請 API 金鑰、有免費額度限制（撞到額度
+
+def resolve_translation_backend(value: str | None) -> str:
+	"""Normalize a backend name; an empty value keeps the Gemini default."""
+	name = str(value or "").strip().lower()
+	if not name:
+		return TRANSLATION_BACKEND_GEMINI
+	if name not in TRANSLATION_BACKENDS:
+		raise RuntimeError(f"翻譯引擎設定無效：{value}（請使用 gemini 或 local）")
+	return name
+
+
+class Translator:
+    """翻譯引擎：預設呼叫 Gemini API；backend="local" 時改呼叫本機語言模型。
+
+    Gemini：雲端大型模型的語言理解能力比塞得進消費級顯卡的本機模型好上一截，
+    翻起來更自然、更少怪異的字句；代價是要申請 API 金鑰、有免費額度限制（撞到額度
     會自動重試幾次）、逐字稿內容會傳到 Google 的伺服器，這是雲端服務本來就
     會有的取捨。
+
+    本機模型：送出跟 Gemini 完全相同的提示詞（同一組函式產生），另外加上本機小模型
+    需要的保護——即時字幕逾時就快速放棄、回覆有問題時不帶上下文重翻一次、批次整理
+    遇到截斷或格式跑掉會自動切小重送，服務停掉會快速失敗而不是卡住。
     """
 
-    def __init__(self):
+    def __init__(self, backend: str | None = None):
+        if backend is None:
+            backend = os.environ.get("TRANSLATION_BACKEND")
+        self.backend = resolve_translation_backend(backend)
+        self.local = None
+        if self.backend == TRANSLATION_BACKEND_LOCAL:
+            self.client = None
+            try:
+                self.local = LocalTranslationEngine(postprocess=_collapse_repetition)
+                warmup_system, warmup_user = _context_prompts("", "こんにちは。", None)
+                self.local.prepare(warmup_system, warmup_user, "こんにちは。")
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"無法使用本機語言模型：{e}\n"
+                    "請先啟動 llama-server 並載入模型（見 README「本機語言模型」），確認 LOCAL_LLM_BASE_URL"
+                    "（預設 http://127.0.0.1:8766）設定正確，或在啟動畫面改選 Gemini API。"
+                ) from e
+            return
+
+        _import_gemini_sdk()
         api_key = self._load_api_key()
         if not api_key:
             raise RuntimeError(
@@ -1256,6 +1383,8 @@ class Translator:
         return None
 
     def _chat(self, system_prompt: str, user_prompt: str) -> str:
+        if self.backend == TRANSLATION_BACKEND_LOCAL:
+            return self.local.live_chat(system_prompt, user_prompt)
         # 這裡故意不做「撞到額度限制就睡幾秒重試」這件事——Worker 是單一執行緒
         # 依序處理每一句話，這裡卡多久，後面所有排隊中的字幕就跟著晚多久出現，
         # 睡眠等待幾秒鐘乘上好幾次重試，很容易就吃光延遲緩衝爭取來的時間，變成
@@ -1303,6 +1432,8 @@ class Translator:
         hint = glossary_hint(glossary) if glossary else ""
         if hint:
             system_prompt += "\n" + hint
+        if self.backend == TRANSLATION_BACKEND_LOCAL:
+            return self.local.translate_live(system_prompt, f"請翻譯：\n{text}", text, glossary)
         return self._chat(system_prompt, f"請翻譯：\n{text}")
 
     def translate_with_context(self, prev_ja: str, current_ja: str, glossary: dict | None = None) -> str:
@@ -1314,16 +1445,12 @@ class Translator:
         if not current_ja.strip():
             return ""
 
-        system_prompt = _SYSTEM_PROMPT_BASE
-        hint = glossary_hint(glossary) if glossary else ""
-        if hint:
-            system_prompt += "\n" + hint
-
-        if prev_ja:
-            user_prompt = f"前一句話（僅供參考上下文，不用翻譯）：\n{prev_ja}\n\n請翻譯這一句：\n{current_ja}"
-        else:
-            user_prompt = f"請翻譯這一句：\n{current_ja}"
-
+        system_prompt, user_prompt = _context_prompts(prev_ja, current_ja, glossary)
+        if self.backend == TRANSLATION_BACKEND_LOCAL:
+            # 同一組提示詞；回覆有問題（空白、照抄提示、沒翻成中文）時不帶前一句重翻一次
+            return self.local.translate_live(
+                system_prompt, user_prompt, current_ja, glossary, fallback_user_prompt=f"請翻譯：\n{current_ja}"
+            )
         return self._chat(system_prompt, user_prompt)
 
 
@@ -1338,6 +1465,7 @@ class Worker(threading.Thread):
         episode_title: str = "",
         date_str: str | None = None,
         pause_state: "PauseState | None" = None,
+        translator: "Translator | None" = None,
     ):
         super().__init__(daemon=True)
         self.utterance_queue = utterance_queue
@@ -1350,7 +1478,8 @@ class Worker(threading.Thread):
         self.asr = WhisperModel(
             WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
         )
-        self.translator = Translator()
+        # main() 會先建好翻譯引擎（金鑰或本機服務有問題就在動到音訊設定前結束）
+        self.translator = translator if translator is not None else Translator()
         self._stop = threading.Event()
 
         # 用來偵測 Whisper 卡進「幻覺迴圈」：音訊有雜音/glitch 時，有時候會連續
@@ -1747,7 +1876,7 @@ OUTPUT_DEFAULT_LABEL = "系統預設（可能會有回音問題）"
 def main():
     global DISPLAY_DELAY_SEC
 
-    print("=== 即時中日對照字幕（Gemini API 版） ===")
+    print("=== 即時中日對照字幕（Gemini API / 本機語言模型） ===")
 
     from tkinter import filedialog, messagebox
     from startup_gui import run_startup_dialog, load_last_settings, save_last_settings, index_of_name
@@ -1819,19 +1948,36 @@ def main():
         print(f"列出播放裝置失敗，使用系統預設：{e}")
     output_names = [OUTPUT_DEFAULT_LABEL] + [name for _, name in output_candidates]
 
+    # 翻譯引擎：環境變數 TRANSLATION_BACKEND 優先，其次是上次的選擇，都沒有就用 Gemini
+    try:
+        preferred_backend = resolve_translation_backend(
+            os.environ.get("TRANSLATION_BACKEND") or last.get("translation_backend")
+        )
+    except RuntimeError as e:
+        print(f"{e}，改用 Gemini API。")
+        preferred_backend = TRANSLATION_BACKEND_GEMINI
+    backend_labels = [TRANSLATION_BACKEND_LABELS[name] for name in TRANSLATION_BACKENDS]
+
     dialog = run_startup_dialog(
         window_titles=window_titles,
         input_device_names=input_names,
         output_device_names=output_names,
         default_delay=last.get("delay", DISPLAY_DELAY_SEC),
         default_episode_title=(cue_data.get("episode_title") if cue_data else None) or last.get("episode_title", ""),
+        # 讀取預先轉錄字幕檔模式不會用到翻譯，就不顯示翻譯引擎選項
+        model_options=backend_labels if cue_data is None else None,
+        model_label="翻譯引擎（本機語言模型需先啟動 llama-server，見 README）",
         default_window_index=index_of_name(window_titles, last.get("window_title")),
         default_input_index=index_of_name(input_names, last.get("input_device")),
         default_output_index=index_of_name(output_names, last.get("output_device")),
+        default_model_index=TRANSLATION_BACKENDS.index(preferred_backend),
     )
     if dialog is None:
         print("已取消。")
         sys.exit(0)
+    translation_backend = (
+        TRANSLATION_BACKENDS[dialog["model_index"]] if dialog.get("model_index") is not None else preferred_backend
+    )
 
     chosen_window = candidates[dialog["window_index"]]
     hwnd = chosen_window._hWnd
@@ -1864,7 +2010,18 @@ def main():
         "delay": DISPLAY_DELAY_SEC,
         "input_device": INPUT_DEFAULT_LABEL if input_device_was_default else input_device["name"],
         "output_device": output_names[dialog["output_index"]] if dialog["output_index"] == 0 else output_candidates[dialog["output_index"] - 1][1],
+        "translation_backend": translation_backend,
     })
+
+    # 先把翻譯引擎建好（Gemini 金鑰、本機模型服務有問題的話，在動到來源程式的音訊
+    # 輸出設定之前就先結束，不會留下要自己手動切回來的設定）
+    translator = None
+    if cue_data is None:
+        try:
+            translator = Translator(translation_backend)
+        except RuntimeError as e:
+            print(f"翻譯引擎初始化失敗：{e}")
+            sys.exit(1)
 
     using_virtual_cable = bool(input_device and "CABLE" in input_device["name"].upper())
     original_output_device = None
@@ -1941,7 +2098,7 @@ def main():
         )
         worker = Worker(
             utterance_queue, caption_queue, transcript_queue, episode_title,
-            date_str=date_str, pause_state=pause_state,
+            date_str=date_str, pause_state=pause_state, translator=translator,
         )
 
     # 延遲聲音一定要從「不是被擷取來源」的裝置播出來，不然會變成回音疊加的無限循環

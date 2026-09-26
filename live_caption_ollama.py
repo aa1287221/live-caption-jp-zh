@@ -860,14 +860,6 @@ class DelayedAudioPlayer:
             except Exception:
                 pass
 
-    def stop(self):
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-
 
 class AudioCapture(threading.Thread):
     """從系統輸出裝置 (loopback) 擷取音訊：
