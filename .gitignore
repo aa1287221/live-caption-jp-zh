@@ -6,16 +6,22 @@ openrouter_api_key.txt
 
 # 機器/個人狀態，不是原始碼
 last_settings.json
+local_llm_server.json
+glossary.json
 
 # Python
 __pycache__/
 *.pyc
 
-# 打包好的執行檔、第三方工具（體積大、屬於建置產物，不放原始碼庫）
+# 打包好的執行檔、第三方工具、下載的模型（體積大、屬於建置產物，不放原始碼庫）
 *.exe
 tools/
+models/
 build/
 *.spec
+
+# setup_local_llm.py／自動啟動 llama-server 產生的執行期 log
+logs/
 
 # 執行期間產生的逐字稿、錄音、個人收聽紀錄
 transcripts/
