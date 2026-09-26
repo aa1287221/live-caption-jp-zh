@@ -112,6 +112,115 @@ class DownloadFileTests(unittest.TestCase):
 			setup.download_file("http://example.test/file.bin", dest, expected, urlopen=opener)
 			self.assertEqual(dest.read_bytes(), full)
 
+	def test_urlopen_is_given_a_socket_timeout_on_every_attempt(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			dest = Path(tmp) / "file.bin"
+			body = b"payload"
+			expected = hashlib.sha256(body).hexdigest()
+			opener = mock.Mock(return_value=FakeResponse(body))
+			setup.download_file("http://example.test/file.bin", dest, expected, urlopen=opener)
+			self.assertIn("timeout", opener.call_args.kwargs)
+			self.assertGreater(opener.call_args.kwargs["timeout"], 0)
+
+
+class StreamThenTimeout:
+	"""A response that yields ``body`` a chunk at a time, then times out once ``fail_after``
+	bytes have been read -- simulates a connection that stalls partway through (0 B/s, the
+	real-world bug this guards against: urlopen with no timeout hung forever mid-download)."""
+
+	def __init__(self, body: bytes, fail_after: int, *, total_content_length: int, status: int = 200):
+		self._body = body
+		self._fail_after = fail_after
+		self._sent = 0
+		self.status = status
+		self.headers = {"Content-Length": str(total_content_length)}
+
+	def read(self, size: int = -1) -> bytes:
+		if self._sent >= self._fail_after:
+			raise TimeoutError("timed out")
+		chunk = self._body[:size] if size and size > 0 else self._body
+		self._body = self._body[len(chunk):]
+		self._sent += len(chunk)
+		return chunk
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, *_exc):
+		return False
+
+
+class AlwaysStallsAfterAFewBytes:
+	"""Every attempt writes a few bytes then times out -- server never honours Range either."""
+
+	def __init__(self, chunk: bytes):
+		self._chunk = chunk
+		self._sent = False
+		self.status = 200
+		self.headers = {"Content-Length": "1000"}
+
+	def read(self, size: int = -1) -> bytes:
+		if not self._sent:
+			self._sent = True
+			return self._chunk[:size] if size and size > 0 else self._chunk
+		raise TimeoutError("timed out")
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, *_exc):
+		return False
+
+
+class DownloadStallAndRetryTests(unittest.TestCase):
+	"""Reproduces the real-world hang: a stalled connection must time out and retry,
+	resuming from .part, instead of blocking forever."""
+
+	def test_stall_mid_stream_retries_and_resumes_from_the_part_file(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			dest = Path(tmp) / "file.bin"
+			full = b"0123456789" * 5  # 50 bytes
+			expected = hashlib.sha256(full).hexdigest()
+			first = StreamThenTimeout(full, fail_after=20, total_content_length=len(full))
+			second = FakeResponse(full[20:], status=206, headers={"Content-Length": str(len(full) - 20)})
+			opener = mock.Mock(side_effect=[first, second])
+			sleeps = []
+			setup.download_file(
+				"http://example.test/file.bin", dest, expected,
+				urlopen=opener, chunk_size=10, sleep=sleeps.append,
+			)
+			self.assertEqual(dest.read_bytes(), full)
+			self.assertFalse(dest.with_name(dest.name + ".part").exists())
+			self.assertEqual(opener.call_count, 2)
+			second_request = opener.call_args_list[1][0][0]
+			self.assertEqual(second_request.get_header("Range"), "bytes=20-")
+			for call in opener.call_args_list:
+				self.assertIn("timeout", call.kwargs)
+				self.assertGreater(call.kwargs["timeout"], 0)
+			self.assertEqual(len(sleeps), 1)  # one backoff, between the two attempts
+
+	def test_always_stalling_download_retries_bounded_times_then_raises_keeping_part(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			dest = Path(tmp) / "file.bin"
+			opener = mock.Mock(side_effect=lambda *a, **k: AlwaysStallsAfterAFewBytes(b"abcde"))
+			sleeps = []
+			with self.assertRaises(RuntimeError) as caught:
+				setup.download_file(
+					"http://example.test/file.bin", dest, "0" * 64,
+					urlopen=opener, chunk_size=10, sleep=sleeps.append, max_attempts=3,
+				)
+			message = str(caught.exception)
+			self.assertIn("重試", message)
+			self.assertIn("重新執行", message)
+			self.assertEqual(opener.call_count, 3)
+			self.assertEqual(len(sleeps), 2)  # backoff between attempts, none after the last
+			self.assertFalse(dest.exists())
+			part = dest.with_name(dest.name + ".part")
+			self.assertTrue(part.exists())
+			self.assertEqual(part.read_bytes(), b"abcde")
+			for call in opener.call_args_list:
+				self.assertIn("timeout", call.kwargs)
+
 
 class ExtractZipTests(unittest.TestCase):
 	def test_extract_zip_writes_members_into_dest_dir(self):

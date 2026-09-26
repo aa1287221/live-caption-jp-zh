@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -41,6 +42,10 @@ DEFAULT_MODEL_URL = "https://huggingface.co/google/gemma-4-26B-A4B-it-qat-q4_0-g
 DEFAULT_MODEL_SHA256 = "3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d"
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
+# 沒有 timeout 的話，連線卡住（0 B/s）會永遠掛在 urlopen/read() 上，實測在 22MB 處卡死過。
+DOWNLOAD_TIMEOUT = 60.0
+MAX_DOWNLOAD_ATTEMPTS = 5
+_RETRY_BACKOFF_SECONDS = 2.0
 
 
 # ---------- sha256 / 下載（.part -> 驗證 -> rename，中斷後可以直接重跑） ----------
@@ -65,12 +70,22 @@ def _content_length(response) -> int:
 		return 0
 
 
-def download_file(url: str, dest: Path, expected_sha256: str, *, urlopen=urllib.request.urlopen, chunk_size: int = _CHUNK_SIZE, on_progress=None) -> None:
+def download_file(
+	url: str, dest: Path, expected_sha256: str, *, urlopen=urllib.request.urlopen,
+	chunk_size: int = _CHUNK_SIZE, on_progress=None, timeout: float = DOWNLOAD_TIMEOUT,
+	max_attempts: int = MAX_DOWNLOAD_ATTEMPTS, sleep=time.sleep,
+) -> None:
 	"""Stream ``url`` into ``dest`` via a ``.part`` file; only renamed after sha256 matches.
 
 	A previous ``.part`` is resumed with a Range request when the server honours it (HTTP
 	206); otherwise the download restarts from scratch. Interrupting this function (Ctrl+C,
 	crash) never leaves a corrupt file at ``dest`` -- only ``.part`` is ever partial.
+
+	``timeout`` bounds both the connect and every individual read -- without it a stalled
+	connection (0 B/s) blocks forever instead of failing (hit this for real: hung at 22 MB
+	against the GitHub release CDN). A stall or dropped connection is retried up to
+	``max_attempts`` times with a short backoff, resuming from ``.part`` each time; on final
+	failure ``.part`` is kept (never deleted) so simply re-running the script resumes it.
 	"""
 	dest.parent.mkdir(parents=True, exist_ok=True)
 	if verify_existing(dest, expected_sha256):
@@ -78,33 +93,51 @@ def download_file(url: str, dest: Path, expected_sha256: str, *, urlopen=urllib.
 			on_progress(dest.name, "skip", 0, 0)
 		return
 	part = dest.with_name(dest.name + ".part")
-	resume_from = part.stat().st_size if part.exists() else 0
-	request = urllib.request.Request(url)
-	if resume_from:
-		request.add_header("Range", f"bytes={resume_from}-")
-	try:
-		response = urlopen(request)
-	except urllib.error.URLError as error:
-		raise RuntimeError(f"下載失敗：{url}（{error}）") from error
-	with response:
-		resumed = resume_from and getattr(response, "status", 200) == 206
-		mode = "ab" if resumed else "wb"
-		written = resume_from if resumed else 0
-		total = written + _content_length(response)
-		with open(part, mode) as f:
-			while True:
-				chunk = response.read(chunk_size)
-				if not chunk:
-					break
-				f.write(chunk)
-				written += len(chunk)
-				if on_progress:
-					on_progress(dest.name, "downloading", written, total)
-	actual = sha256_of_file(part)
-	if actual != expected_sha256:
-		part.unlink(missing_ok=True)
-		raise RuntimeError(f"下載內容 sha256 不符：{dest.name}（預期 {expected_sha256}，實際 {actual}），已刪除，請重新執行。")
-	part.replace(dest)
+
+	last_error = None
+	for attempt in range(1, max_attempts + 1):
+		resume_from = part.stat().st_size if part.exists() else 0
+		request = urllib.request.Request(url)
+		if resume_from:
+			request.add_header("Range", f"bytes={resume_from}-")
+		try:
+			response = urlopen(request, timeout=timeout)
+		except urllib.error.URLError as error:
+			last_error = error
+		else:
+			try:
+				with response:
+					resumed = resume_from and getattr(response, "status", 200) == 206
+					mode = "ab" if resumed else "wb"
+					written = resume_from if resumed else 0
+					total = written + _content_length(response)
+					with open(part, mode) as f:
+						while True:
+							chunk = response.read(chunk_size)
+							if not chunk:
+								break
+							f.write(chunk)
+							written += len(chunk)
+							if on_progress:
+								on_progress(dest.name, "downloading", written, total)
+			except OSError as error:  # covers socket.timeout (== TimeoutError) and dropped connections
+				last_error = error
+			else:
+				actual = sha256_of_file(part)
+				if actual != expected_sha256:
+					part.unlink(missing_ok=True)
+					raise RuntimeError(f"下載內容 sha256 不符：{dest.name}（預期 {expected_sha256}，實際 {actual}），已刪除，請重新執行。")
+				part.replace(dest)
+				return
+		if attempt < max_attempts:
+			if on_progress:
+				on_progress(dest.name, "retry", attempt, max_attempts)
+			sleep(_RETRY_BACKOFF_SECONDS)
+
+	raise RuntimeError(
+		f"下載中斷（已重試 {max_attempts} 次仍失敗）：{dest.name}（{last_error}）\n"
+		f"已下載的部分保留在 {part}，直接重新執行這支腳本就會從中斷處繼續下載。"
+	)
 
 
 def extract_zip(zip_path: Path, dest_dir: Path) -> list:
@@ -167,6 +200,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _print_progress(name: str, phase: str, written: int, total: int) -> None:
 	if phase == "skip":
 		print(f"  {name}：sha256 已符合，略過下載。")
+		return
+	if phase == "retry":
+		# 這裡 written/total 被借用為「第幾次／最多幾次」，跟 downloading 階段的位元組數不同單位
+		print(f"\n  {name}：下載中斷，{_RETRY_BACKOFF_SECONDS:g} 秒後重試（第 {written}/{total} 次）...")
 		return
 	mb = 1024 * 1024
 	if total:
