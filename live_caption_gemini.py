@@ -2,9 +2,10 @@
 live_caption_gemini.py
 跟 live_caption.py 完全一樣的內建擷取版，翻譯引擎可以在啟動畫面「⑥ 翻譯引擎」選：
   - Gemini API（預設，GEMINI_MODEL）：雲端翻譯，需要 API 金鑰，行為跟以前完全一樣
-  - 本機語言模型：呼叫你自己先啟動的 llama-server（或 Ollama 等 OpenAI 相容服務），
-    不需要金鑰、不用額度、逐字稿不會離開你的電腦；送出的提示詞、前一句上下文、
-    事後重新辨識+潤稿、預先轉錄的流程都跟 Gemini 版相同（設定方式見下方與 README）
+  - 本機語言模型：呼叫 llama-server（跑一次 setup_local_llm.py 設定好就會自動啟動；
+    也可以用自己先啟動的 llama-server 或 Ollama 等 OpenAI 相容服務），不需要金鑰、
+    不用額度、逐字稿不會離開你的電腦；送出的提示詞、前一句上下文、事後重新辨識+
+    潤稿、預先轉錄的流程都跟 Gemini 版相同（設定方式見下方與 README）
 檔名保留 gemini，既有的捷徑、啟動器、transcribe_audio_file.py 都不用改。
 
 使用情境：
@@ -33,10 +34,13 @@ live_caption_gemini.py
     免費額度大約：gemini-2.5-flash-lite 每天 1,000 次、每分鐘 15 次請求，
     大概夠一天看一集左右的節目份量，實際額度以 Google 官方頁面當下顯示為準。
 
-    改用本機語言模型的話（不需要金鑰、不用 google-genai）：先在另一個視窗啟動
-    llama-server 並載入模型，例如：
-        llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -ngl 99
-    再到啟動畫面把「⑥ 翻譯引擎」選成本機語言模型（會記住上次的選擇）。
+    改用本機語言模型的話（不需要金鑰、不用 google-genai）：跑一次
+        python setup_local_llm.py
+    下載 llama-server 與預設模型、寫好設定，之後在啟動畫面把「⑥ 翻譯引擎」選成
+    本機語言模型（會記住上次的選擇），程式偵測到沒有服務回應就會自動啟動。
+    也可以自己先啟動 llama-server（例如
+    `llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -ngl 99`），
+    程式偵測到已有服務在跑就會直接使用，不會重複啟動。
     服務網址不是 http://127.0.0.1:8766 的話，用環境變數 LOCAL_LLM_BASE_URL 指定。
     想要跟 Gemini 一樣會看上下文、會校正辨識錯字的效果，請載入通用指令模型
     （例如 Qwen2.5-14B-Instruct）；Riva-Translate 這類翻譯專用模型會自動改成逐句翻譯。
@@ -1394,6 +1398,14 @@ class Translator:
                 # 講清楚原因，不用再套一層「請先手動啟動」的樣板文字。
                 raise RuntimeError(str(e)) from e
             except RuntimeError as e:
+                if self.llama_server is not None:
+                    # 本程式剛剛自動啟動了服務，問題出在別的地方（暖機翻譯失敗等）；
+                    # 這時候叫使用者「自己先啟動」或「設定自動啟動」都文不對題。
+                    raise RuntimeError(
+                        f"已自動啟動 llama-server，但本機語言模型無法使用：{e}\n"
+                        "請檢查 logs/llama-server.log 的內容，確認模型與 server_args 設定正確，"
+                        "或在啟動畫面改選 Gemini API。"
+                    ) from e
                 raise RuntimeError(
                     f"無法使用本機語言模型：{e}\n"
                     "請先啟動 llama-server 並載入模型（見 README「本機語言模型」），確認 LOCAL_LLM_BASE_URL"
@@ -1989,7 +2001,7 @@ def main():
         default_episode_title=(cue_data.get("episode_title") if cue_data else None) or last.get("episode_title", ""),
         # 讀取預先轉錄字幕檔模式不會用到翻譯，就不顯示翻譯引擎選項
         model_options=backend_labels if cue_data is None else None,
-        model_label="翻譯引擎（本機語言模型需先啟動 llama-server，見 README）",
+        model_label="翻譯引擎（本機語言模型設定好會自動啟動 llama-server，見 README）",
         default_window_index=index_of_name(window_titles, last.get("window_title")),
         default_input_index=index_of_name(input_names, last.get("input_device")),
         default_output_index=index_of_name(output_names, last.get("output_device")),

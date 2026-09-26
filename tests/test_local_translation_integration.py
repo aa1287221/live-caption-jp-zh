@@ -158,7 +158,10 @@ class TranslationBackendTestCase(unittest.TestCase):
 				sleep=self.sleeps.append, log=lambda *_: None, **kwargs,
 			)
 
-		with mock.patch.object(self.app, "LocalTranslationEngine", factory):
+		# Hermetic regardless of what's on the developer's real machine (LOCAL_LLM_* env,
+		# a real local_llm_server.json): never let auto-start actually run in this helper.
+		with mock.patch.object(self.app, "LocalTranslationEngine", factory), \
+				mock.patch.object(self.app, "ensure_llama_server", return_value=None):
 			translator = self.app.Translator("local")
 		client.calls.clear()
 		return translator, client
@@ -328,6 +331,22 @@ class LocalBackendTests(TranslationBackendTestCase):
 		message = str(caught.exception)
 		self.assertIn("找不到模型檔", message)
 		self.assertNotIn("請先啟動 llama-server 並載入模型", message)
+
+	def test_m3_spawned_server_gets_a_different_message_when_prepare_still_fails(self):
+		# The app itself just auto-started the server (ensure_llama_server returned a
+		# handle); telling the user to "start it yourself" / "configure auto-start" would
+		# be nonsensical when auto-start already ran and the failure is something else.
+		client = ScriptedClient(lambda s, u: LocalLLMError("暖機失敗", kind="empty"))
+		factory = lambda **kwargs: LocalTranslationEngine(client, startup_wait=0, log=lambda *_: None, **kwargs)
+		with mock.patch.object(self.app, "LocalTranslationEngine", factory), \
+				mock.patch.object(self.app, "ensure_llama_server", return_value=mock.Mock()):
+			with self.assertRaises(RuntimeError) as caught:
+				self.app.Translator("local")
+		message = str(caught.exception)
+		self.assertIn("已自動啟動 llama-server", message)
+		self.assertIn("暖機失敗", message)
+		self.assertNotIn("請先啟動 llama-server 並載入模型", message)
+		self.assertNotIn("LOCAL_LLM_MODEL_PATH", message)
 
 	def test_local_live_caption_repairs_bad_reply(self):
 		replies = iter(["今日はいい天気ですね。", "今天天氣真好呢。"])
