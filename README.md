@@ -202,6 +202,8 @@ python -m unittest discover -s tests -p test_llama_server_live.py -v
 
 其餘自動測試不需要 GPU、音訊裝置或網路：`python -m unittest discover -s tests`
 
+完整的驗證清單（含 Windows 實機步驟與可以直接交給 Claude Code 的審查指示）見 `docs/VERIFY_DUAL_BACKEND.md`。
+
 ## 專有名詞對照表（glossary.json）
 
 容易被聽錯/翻錯的人名、節目名，可以編輯 `glossary.json` 增減，格式：
