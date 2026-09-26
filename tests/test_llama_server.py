@@ -10,6 +10,7 @@ builds. Row 8 (config precedence) and row 10 (server_args parsing) are pure-func
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -138,6 +139,22 @@ class NoSpawnDecisionTests(LlamaServerTestCase):
 				ensure_llama_server(client, config=config)
 		spy.assert_not_called()
 
+	def test_h6_reachable_server_is_used_even_if_config_would_fail_to_resolve(self):
+		"""Spec rule 2: a health probe success must win regardless of config validity.
+
+		config=None (the production default) forces ensure_llama_server to resolve its own
+		LlamaServerConfig -- but only if it decides the server is unreachable. A malformed
+		LOCAL_LLM_SPAWN_WAIT must never be allowed to block use of an already-running server.
+		"""
+		client = FakeProbeClient("http://127.0.0.1:8766", outcome=None)  # already reachable
+		with mock.patch.dict(os.environ, {"LOCAL_LLM_SPAWN_WAIT": "abc"}), \
+				mock.patch("llama_server.LlamaServerConfig.resolve", side_effect=AssertionError("resolve must not run when reachable")) as resolve_spy, \
+				mock.patch("llama_server.ManagedLlamaServer") as spawn_spy:
+			result = ensure_llama_server(client, config=None)
+		self.assertIsNone(result)
+		resolve_spy.assert_not_called()
+		spawn_spy.assert_not_called()
+
 
 # ---------- rows 5-7: a real fake-server child process ----------
 
@@ -187,6 +204,52 @@ class RealSpawnTests(LlamaServerTestCase):
 		server.stop()
 		self.assertIsNotNone(server.process.poll())
 		server.stop()  # idempotent: no error, no hang
+
+	def test_m1_wait_message_is_logged_once(self):
+		port = free_port()
+		config = self.make_config(port, startup_wait=30)
+		logs = []
+		with mock.patch.dict(os.environ, {"FAKE_HEALTH_503_COUNT": "3"}):
+			server, _client = self.ensure(config, log=logs.append)
+		wait_lines = [line for line in logs if "等待本機模型服務就緒" in line]
+		self.assertEqual(len(wait_lines), 1, logs)
+		self.assertIn("最多 30", wait_lines[0])
+
+
+class SpawnFailureTests(LlamaServerTestCase):
+	def test_h5_invalid_exe_is_wrapped_as_llamaservererror_naming_the_path_and_closes_the_log(self):
+		bad_exe = self.tmp_path / "not-really-an-exe.exe"
+		bad_exe.write_text("this is not a valid Win32 executable", encoding="utf-8")
+		config = self.make_config(free_port(), server_exe=bad_exe)
+		client = FakeProbeClient(config.base_url, LocalLLMError("連線失敗", kind="connection", retryable=True))
+
+		created = []
+		real_cls = ManagedLlamaServer
+
+		def spy_factory(*args, **kwargs):
+			instance = real_cls(*args, **kwargs)
+			created.append(instance)
+			return instance
+
+		with mock.patch("llama_server.ManagedLlamaServer", side_effect=spy_factory):
+			with self.assertRaises(LlamaServerError) as caught:
+				ensure_llama_server(client, config=config, log_path=self.log_path, log=lambda *_: None)
+		self.assertIn(str(bad_exe), str(caught.exception))
+		self.assertEqual(len(created), 1)
+		self.assertIsNone(created[0]._log_file, "log handle must be closed, not leaked, on a failed spawn")
+		self.assertIsNone(created[0].process)
+
+	def test_item7_stop_survives_a_wait_timeout_even_after_kill(self):
+		config = self.make_config(free_port())
+		server = ManagedLlamaServer(config, log=lambda *_: None)
+		fake_process = mock.Mock()
+		fake_process.poll.return_value = None  # still "running" every time it's checked
+		fake_process.wait.side_effect = subprocess.TimeoutExpired(cmd="llama-server", timeout=5)
+		server.process = fake_process
+		server.stop()  # must not raise, even though kill()'s own wait() also times out
+		fake_process.terminate.assert_called_once()
+		fake_process.kill.assert_called_once()
+		self.assertEqual(fake_process.wait.call_count, 2)
 
 
 # ---------- row 8: config precedence, pure ----------

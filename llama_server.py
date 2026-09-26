@@ -238,8 +238,11 @@ class ManagedLlamaServer:
 				self.process.terminate()
 				self.process.wait(timeout=5)
 			except subprocess.TimeoutExpired:
-				self.process.kill()
-				self.process.wait(timeout=5)
+				try:
+					self.process.kill()
+					self.process.wait(timeout=5)
+				except subprocess.TimeoutExpired as error:
+					self.log(f"提醒：llama-server 子行程 kill() 後仍未在時限內結束：{error}")
 			except OSError as error:
 				self.log(f"提醒：終止 llama-server 子行程時發生錯誤：{error}")
 		if self._log_file is not None:
@@ -314,6 +317,19 @@ def _assign_to_windows_job(pid: int) -> int:
 		]
 
 	kernel32 = ctypes.windll.kernel32
+	# HANDLE is pointer-sized; ctypes' default restype (c_int, 32-bit) can truncate/misread
+	# a handle value on Win64 without this -- explicit is correct, not just "happens to work".
+	kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+	kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+	kernel32.OpenProcess.restype = ctypes.c_void_p
+	kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+	kernel32.SetInformationJobObject.restype = ctypes.c_int
+	kernel32.SetInformationJobObject.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+	kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+	kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+	kernel32.CloseHandle.restype = ctypes.c_int
+	kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
 	job = kernel32.CreateJobObjectW(None, None)
 	if not job:
 		raise ctypes.WinError()
@@ -348,7 +364,6 @@ def ensure_llama_server(
 	server answered (never spawned, never stopped) or auto-start is not configured (today's
 	behaviour: the caller's own readiness wait raises its usual, unchanged error).
 	"""
-	config = config if config is not None else LlamaServerConfig.resolve(base_url=client.base_url)
 	try:
 		client.ensure_ready(wait_seconds=0)
 		return None
@@ -358,6 +373,10 @@ def ensure_llama_server(
 			return None
 		if not error.unreachable:
 			raise
+	# Only resolve config once we know we might actually need to spawn: a malformed
+	# LOCAL_LLM_SPAWN_WAIT/server_args/JSON file must never block an already-reachable
+	# server (spec rule 2) just because ensure_llama_server() also resolves config.
+	config = config if config is not None else LlamaServerConfig.resolve(base_url=client.base_url)
 	if not config.auto_start_enabled:
 		return None
 	if not config.is_loopback:
@@ -376,9 +395,21 @@ def ensure_llama_server(
 			"請先執行 setup_local_llm.py 下載，或設定 LOCAL_LLM_MODEL_PATH 指向正確的 GGUF 檔案。"
 		)
 	server = ManagedLlamaServer(config, command_prefix=command_prefix, log_path=log_path, log=log)
-	server.start()
+	notices = []
+
+	def on_wait(error):
+		if not notices:
+			log(f"等待本機模型服務就緒（最多 {config.startup_wait:g} 秒）：{error}")
+		notices.append(error)
+
 	try:
-		server.wait_ready(client, poll_interval=poll_interval)
+		# start() can fail (bad exe, unwritable logs/, ...): keep it in the try too, or a
+		# raw OSError escapes uncaught and the log handle open() already did stays leaked.
+		server.start()
+		server.wait_ready(client, poll_interval=poll_interval, on_wait=on_wait)
+	except OSError as error:
+		server.stop()
+		raise LlamaServerError(f"啟動 llama-server 失敗：{config.server_exe}（{error}）") from error
 	except Exception:
 		# Release the log handle / Job Object now; the caller never gets a handle to this
 		# instance to clean up itself since we raise instead of returning it.
