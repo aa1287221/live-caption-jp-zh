@@ -109,8 +109,7 @@ def import_application():
 		"sounddevice": types.ModuleType("sounddevice"),
 		"tkinter": tkinter, "tkinter.scrolledtext": tkinter.scrolledtext,
 	})
-	for name in ("live_caption_gemini", "transcribe_audio_file"):
-		sys.modules.pop(name, None)
+	sys.modules.pop("live_caption_gemini", None)
 	return importlib.import_module("live_caption_gemini")
 
 
@@ -126,7 +125,6 @@ class TranslationBackendTestCase(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):
 		cls.app = import_application()
-		cls.offline = importlib.import_module("transcribe_audio_file")
 
 	def setUp(self):
 		self.environment = mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True)
@@ -176,18 +174,6 @@ class TranslationBackendTestCase(unittest.TestCase):
 		out_path = self.app.rebuild_transcript_from_full_audio(wav_path, asr, translator, {"田中": "田中"}, "節目")
 		return out_path, wav_path
 
-	def run_offline(self, translator, lines):
-		asr = mock.Mock()
-		asr.transcribe.return_value = ([FakeSegment(i, text) for i, text in enumerate(lines)], None)
-		temp_dir = tempfile.TemporaryDirectory()
-		self.addCleanup(temp_dir.cleanup)
-		audio_path = Path(temp_dir.name) / "episode.wav"
-		audio_path.write_bytes(b"RIFF")
-		with mock.patch.object(self.offline, "WhisperModel", return_value=asr), \
-				mock.patch.object(self.offline, "load_glossary", return_value={"田中": "田中"}), \
-				mock.patch.object(self.offline.time, "sleep", side_effect=self.sleeps.append):
-			cues_path, transcript_path = self.offline.transcribe_audio_file(audio_path, "節目", translator=translator)
-		return json.loads(cues_path.read_text(encoding="utf-8"))["cues"], transcript_path.read_text(encoding="utf-8")
 
 
 class GeminiPathTests(TranslationBackendTestCase):
@@ -245,21 +231,6 @@ class GeminiPathTests(TranslationBackendTestCase):
 		self.assertTrue(wav_path.exists())
 		self.assertIn("已保留完整錄音", self.printed_text())
 
-	def test_gemini_offline_numbered_batches_are_unchanged(self):
-		lines = [f"日文{i}です。" for i in range(41)]
-
-		def reply(contents, n):
-			body = contents.split("句）：\n", 1)[1]
-			return "\n".join(f"{line.split('. ', 1)[0]}. 中文{line.split('. ', 1)[1]}" for line in body.splitlines())
-
-		translator, calls = self.gemini_translator(reply)
-		cues, transcript = self.run_offline(translator, lines)
-		self.assertEqual(len(calls), 2)
-		self.assertIn("請翻譯這一批句子（共 40 句）：\n1. 日文0です。", calls[0]["contents"])
-		self.assertTrue(calls[1]["contents"].startswith("（前面幾句當上下文參考，不用重複翻譯：\n日文38です。\n日文39です。\n\n請翻譯這一批句子（共 1 句）：\n1. 日文40です。"))
-		self.assertEqual([cue["zh"] for cue in cues], [f"中文日文{i}です。" for i in range(41)])
-		self.assertEqual(self.sleeps, [4.5])
-		self.assertIn("**[00:00:40]**\n日文40です。\n中文日文40です。", transcript)
 
 
 class PromptParityTests(TranslationBackendTestCase):
@@ -283,16 +254,6 @@ class PromptParityTests(TranslationBackendTestCase):
 		self.run_reconstruction(local, lines)
 		self.assertEqual([(call["system_instruction"], call["contents"]) for call in calls], client.calls)
 
-	def test_offline_numbered_prompts_are_identical(self):
-		lines = [f"日文{i}です。" for i in range(12)]
-		reply = "\n".join(f"{i + 1}. 中文{i}。" for i in range(12))
-		translator, calls = self.gemini_translator(lambda contents, n: reply)
-		gemini_cues, gemini_transcript = self.run_offline(translator, lines)
-		local, client = self.local_translator(lambda system, user: reply)
-		local_cues, local_transcript = self.run_offline(local, lines)
-		self.assertEqual([(call["system_instruction"], call["contents"]) for call in calls], client.calls)
-		self.assertEqual(gemini_cues, local_cues)
-		self.assertEqual(gemini_transcript.split("---", 1)[1], local_transcript.split("---", 1)[1])
 
 
 class LocalBackendTests(TranslationBackendTestCase):
@@ -398,20 +359,6 @@ class LocalBackendTests(TranslationBackendTestCase):
 		self.assertIn("日文です。\n中文。\n\n田中です。\n中文。", text)
 		self.assertEqual(client.calls[1], ("", "Translate this into Traditional Chinese: __GLOSSARY_0__です。"))
 
-	def test_local_offline_fills_missing_numbers(self):
-		lines = [f"日文{i}です。" for i in range(5)]
-
-		def handler(system, user):
-			if "請翻譯這一批句子" not in user:
-				return "補翻的一句。"
-			body = user.split("句）：\n", 1)[1].splitlines()
-			return "\n".join(f"{line.split('. ', 1)[0]}. 中文{line.split('. ', 1)[1]}" for line in body if not line.startswith("3. ") or len(body) == 1)
-
-		translator, client = self.local_translator(handler)
-		cues, _ = self.run_offline(translator, lines)
-		self.assertTrue(all(cue["zh"] for cue in cues))
-		self.assertEqual(cues[2]["zh"], "中文日文2です。")
-		self.assertEqual(self.sleeps, [])
 
 
 class WhisperModelConfigTests(TranslationBackendTestCase):
@@ -453,12 +400,6 @@ class WorkflowWiringTests(TranslationBackendTestCase):
 		translator_class.assert_not_called()
 		self.assertIs(worker.translator, injected)
 
-	def test_pretranslated_cues_preserve_queue_timing_and_tuple_shape(self):
-		caption_queue, transcript_queue = queue.Queue(), queue.Queue()
-		self.app.push_cues_to_queues([{"start": 1.5, "ja": "日", "zh": "中"}, {"start": 3.0, "ja": "文"}], caption_queue, transcript_queue, 100.0)
-		expected = [(100.0 + 1.5 + self.app.DISPLAY_DELAY_SEC, "日", "中"), (100.0 + 3.0 + self.app.DISPLAY_DELAY_SEC, "文", "")]
-		self.assertEqual([caption_queue.get_nowait(), caption_queue.get_nowait()], expected)
-		self.assertEqual([transcript_queue.get_nowait(), transcript_queue.get_nowait()], expected)
 
 
 if __name__ == "__main__":

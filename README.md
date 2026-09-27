@@ -125,8 +125,8 @@ llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ng
 
 - **想要跟 Gemini 一樣的效果（建議）**：用通用指令模型，例如 Qwen2.5-14B-Instruct 的
   Q4_K_M GGUF（約 9 GB 顯存；`live_caption.py`（Ollama 版）用的也是這個系列）。本程式會送出
-  跟 Gemini 版一字不差的提示詞：即時字幕帶前一句上下文、事後整理會校正辨識錯字並潤稿、
-  預先轉錄用編號批次。16 GB 顯卡要跟 Whisper large-v3 共用，模型太大會爆顯存
+  跟 Gemini 版一字不差的提示詞：即時字幕帶前一句上下文、事後整理會校正辨識錯字並潤稿。
+  16 GB 顯卡要跟 Whisper large-v3 共用，模型太大會爆顯存
   （`setup_local_llm.py` 裝的預設 Gemma 4 26B-A4B QAT q4_0 實測峰值約 12.4 GB，含 Whisper）。
 - **Riva-Translate 這類翻譯專用模型**：程式會自動偵測（模型名稱含 riva 或 Riva 的對話模板），
   改用 Ontime-Translator 的單句翻譯格式、專有名詞用記號保護後換回你設定的顯示文字、
@@ -199,29 +199,19 @@ python live_caption_gemini.py
 - 逐字稿即時存到 `transcripts/transcript_YYYYMMDD_HHMMSS.txt`
 - 結束播放後自動整理成方便閱讀的 `transcript_YYYYMMDD_HHMMSS_polished.md`
 - 若曾開始錄製，結束後會用完整錄音重新辨識+翻譯，產生 `transcript_YYYYMMDD_HHMMSS_notebooklm_style.md`，
-  成功寫出後刪除暫存 WAV（本機模型服務中途停掉的話會保留 WAV，之後可以用下面的預先轉錄重新處理）
+  成功寫出後刪除暫存 WAV（有任何一批整理失敗、或本機模型服務中途停掉的話會保留 WAV，內容不會遺失）
 - 關掉視窗，或在終端機按 Ctrl+C 可結束
-
-### 預先轉錄（transcribe_audio_file.py）
-
-內容已經完整存在（時差重播、先下載好的錄音）時，可以先整段轉錄，再用主程式的
-「讀取預先轉錄好的字幕檔」模式播放，字幕幾乎零延遲：
-
-```bash
-python transcribe_audio_file.py 音檔.mp3 --title "節目名稱"                 # Gemini
-python transcribe_audio_file.py 音檔.mp3 --title "節目名稱" --backend local # 本機語言模型
-```
 
 ## 本機語言模型：跟 Gemini 相同的地方與額外保護
 
 **相同**：提示詞（由同一組函式產生，測試逐字比對兩個引擎送出的內容）、前一句上下文、
-事後整理的校正+潤稿格式、預先轉錄的編號批次、`glossary.json`、所有輸出檔案格式與時間軸。
+事後整理的校正+潤稿格式、`glossary.json`、所有輸出檔案格式與時間軸。
 
 **額外保護**（小模型比較容易出狀況，這些是 Gemini 版沒有的）：
 
 - 即時字幕逾時（預設 15 秒）就放棄那一句，不會拖慢後面的字幕；回覆是空白、照抄提示詞、
   沒翻成中文或長得離譜時，會不帶前一句重翻一次
-- 事後整理/預先轉錄的批次如果被截斷、超過 context、格式跑掉或逾時，會自動切成一半重送，
+- 事後整理的批次如果被截斷、超過 context、格式跑掉或逾時，會自動切成一半重送，
   最後逐句補翻；編號缺漏會補翻，不會留空白也不會對錯行
 - 本機批次比 Gemini 小（20 句 vs 60/40 句），所以每批多附前 8 句當上下文
 - 服務停掉時連續失敗 3 次就停止（即時字幕暫停 30 秒後自動重試），不會卡住幾個小時
@@ -238,7 +228,7 @@ python transcribe_audio_file.py 音檔.mp3 --title "節目名稱" --backend loca
 | `LOCAL_LLM_TIMEOUT` | `120` | 批次整理單次請求逾時秒數 |
 | `LOCAL_LLM_STARTUP_WAIT` | `120` | 啟動時等待服務載入模型的秒數 |
 | `LOCAL_LLM_MAX_TOKENS` | `256` | 單句翻譯的輸出上限 |
-| `LOCAL_LLM_BATCH_LINES` | `20` | 事後整理/預先轉錄每批句數（context 夠大、GPU 夠快可以調高） |
+| `LOCAL_LLM_BATCH_LINES` | `20` | 事後整理每批句數（context 夠大、GPU 夠快可以調高） |
 | `LOCAL_LLM_BATCH_MAX_TOKENS` | `4096` | 批次輸出上限（也不會超過服務 context 的一半） |
 | `LOCAL_LLM_CONTEXT_LINES` | `8` | 每批附帶的前文句數 |
 | `LOCAL_LLM_SEGMENT_CHARS` | `120` | 翻譯專用模型的長句切段長度 |
@@ -271,7 +261,6 @@ python live_caption_gemini.py
 
 ```bash
 python compare_translation_backends.py transcripts/transcript_20260926_210000.txt --judge
-python compare_translation_backends.py 樣本.txt --mode offline      # 比較預先轉錄的編號批次
 python compare_translation_backends.py 樣本.txt --backends local    # 只測本機模型（不需要金鑰）
 ```
 
