@@ -49,6 +49,20 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 要印出 `True` 跟你的顯卡名稱，且不要有 `sm_120 is not compatible` 之類的警告才算成功。
 
+**用 cu130（CUDA 13）版 torch 時要多做一步**：語音辨識用的 faster-whisper 底層是 ctranslate2，
+它需要 CUDA 12 的 cuBLAS（`cublas64_12.dll`），但 cu130 版 torch 只附 CUDA 13 的版本。
+沒處理的話，第一次辨識就會出現
+`RuntimeError: Library cublas64_12.dll is not found or cannot be loaded`。
+裝完第 2 步的套件後執行：
+
+```bash
+pip install nvidia-cublas-cu12
+python -c "import glob,os,shutil,importlib.util as u; src=os.path.join(u.find_spec('nvidia.cublas').submodule_search_locations[0],'bin'); dst=u.find_spec('ctranslate2').submodule_search_locations[0]; [shutil.copy2(f,dst) for f in glob.glob(os.path.join(src,'cublas*64_12.dll'))]; print('copied to', dst)"
+```
+
+這會把 `cublas64_12.dll`、`cublasLt64_12.dll` 複製到 ctranslate2 套件資料夾（它會從那裡載入）。
+已經另外裝了 CUDA 12 Toolkit、而且它的 `bin` 在 PATH 裡的話，可以跳過這步。
+
 ### 2. 安裝其餘 Python 套件
 
 ```bash
@@ -104,6 +118,37 @@ $env:LOCAL_LLM_MODEL = "qwen2.5:14b"
 
 llama-server 跑在 WSL 裡也可以：在 WSL 用 `--host 0.0.0.0` 啟動，Windows 端透過 WSL2 預設的
 localhost 轉送，通常就能用 `http://127.0.0.1:連接埠` 連到（連接埠要跟 `LOCAL_LLM_BASE_URL` 一致）。
+
+### 4. 安裝虛擬音訊線 + SoundVolumeView（建議）
+
+沒有虛擬音訊線的話，只能擷取「系統預設輸出裝置」：會錄到電腦上所有聲音，
+而且即時聲音會跟延遲播放的聲音疊在一起。建議裝以下兩個：
+
+1. **VB-Audio Virtual Cable**（免費驅動程式）：從 https://vb-audio.com/Cable/ 下載
+   `VBCABLE_Driver_Pack` 壓縮檔，解壓後**右鍵 `VBCABLE_Setup_x64.exe` →「以系統管理員身分執行」**
+   → 按「Install Driver」，裝完重開機。之後音訊裝置清單會多出 `CABLE Input` / `CABLE Output`。
+2. **NirSoft SoundVolumeView**（免安裝小工具）：從 https://www.nirsoft.net/utils/sound_volume_view.html
+   下載 64 位元版 zip，把 `SoundVolumeView.exe` 放到程式資料夾底下的 `tools\`
+   （路徑是 `tools\SoundVolumeView.exe`）。程式靠它在開始時自動把來源程式（瀏覽器）的
+   輸出切到 `CABLE Input`、結束時切回原本的裝置；沒放的話要自己到 Windows 音量混音器手動切。
+
+使用時在「④ 音訊擷取來源」選含 `CABLE` 字樣的那項，「⑤ 延遲聲音」選你的耳機或喇叭
+（不要選 CABLE）。
+
+### 5. 打包成 exe、建立桌面捷徑（選用）
+
+「雙擊桌面捷徑」用的是 `launcher_gemini.py` 打包成的小 exe，它只是在同一個資料夾執行
+`python live_caption_gemini.py`，所以 Whisper、torch 等套件還是裝在你的 Python 裡，
+而且終端機輸入 `python` 要能跑到**裝了上面這些套件的那個 Python**。在程式資料夾執行：
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --console --distpath . launcher_gemini.py
+```
+
+會在程式資料夾產生 `launcher_gemini.exe`（`build\`、`launcher_gemini.spec` 可以刪掉）。
+對它按右鍵 →「傳送到」→「桌面（建立捷徑）」，再把捷徑改名成「即時中日字幕」就好。
+exe 必須跟 `live_caption_gemini.py` 放在同一個資料夾。
 
 ## 執行
 
@@ -234,6 +279,12 @@ python -m unittest discover -s tests -p test_llama_server_live.py -v
 ## 常見問題
 
 - **找不到 loopback 裝置**：確認 Windows 音效設定裡有正常輸出裝置在播放聲音，音量沒靜音
+- **`cublas64_12.dll is not found or cannot be loaded`**：用的是 cu130 版 torch，照「安裝」第 1 步
+  最後那段補上 CUDA 12 的 cuBLAS
+- **④ 沒有 CABLE 可以選**：VB-Audio Virtual Cable 還沒裝，或裝完還沒重開機（見「安裝」第 4 步）
+- **用 CABLE 擷取但字幕都不出來（全程靜音）**：自動切換輸出裝置不會影響「已經在播放」的分頁，
+  到瀏覽器重新整理影片頁面（或暫停再播放）聲音才會改走 CABLE；還是沒聲音的話，確認
+  `tools\SoundVolumeView.exe` 存在，或到 Windows 音量混音器手動把瀏覽器輸出設成 `CABLE Input`
 - **顯卡沒被吃到**：重新確認 torch 是否裝成 CUDA 版（`pip show torch` 版本號結尾
   應該是 `+cu130` 之類，而不是純 CPU 版）
 - **想換更準的 Whisper 模型**：把 `live_caption_gemini.py` 裡 `WHISPER_MODEL_SIZE` 改成
