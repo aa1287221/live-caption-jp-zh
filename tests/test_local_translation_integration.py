@@ -234,6 +234,17 @@ class GeminiPathTests(TranslationBackendTestCase):
 		self.assertTrue(text.endswith("批次2\n\n批次3\n"))
 		self.assertFalse(wav_path.exists())
 
+	def test_gemini_reconstruction_keeps_wav_when_a_batch_fails_all_retries(self):
+		lines = [f"日文{i}です。" for i in range(61)]
+		translator, calls = self.gemini_translator(lambda contents, n: "" if n <= 3 else f"批次{n}")
+		out_path, wav_path = self.run_reconstruction(translator, lines)
+		self.assertEqual(len(calls), 4)
+		text = out_path.read_text(encoding="utf-8")
+		self.assertIn("有 1 批整理失敗", text)
+		self.assertTrue(text.endswith("批次4\n"))
+		self.assertTrue(wav_path.exists())
+		self.assertIn("已保留完整錄音", self.printed_text())
+
 	def test_gemini_offline_numbered_batches_are_unchanged(self):
 		lines = [f"日文{i}です。" for i in range(41)]
 

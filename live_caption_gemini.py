@@ -430,8 +430,13 @@ def _rebuild_user_prompt(batch: list[str], context_tail: str) -> str:
 	) + "請處理這一批句子：\n" + "\n".join(batch)
 
 
-def _polish_with_gemini(translator: "Translator", ja_lines: list[str], system_prompt: str) -> list[str]:
+def _polish_with_gemini(
+    translator: "Translator", ja_lines: list[str], system_prompt: str
+) -> tuple[list[str], int]:
+    """回傳 (整理好的段落, 重試 3 次仍失敗的批數)。失敗批數大於 0 時，呼叫端
+    要保留完整錄音，不然那幾批的內容就永遠找不回來了。"""
     polished_parts = []
+    failed_batches = 0
     context_tail = ""
     total_batches = (len(ja_lines) + _POLISH_CHUNK_LINES - 1) // _POLISH_CHUNK_LINES
     for batch_no, i in enumerate(range(0, len(ja_lines), _POLISH_CHUNK_LINES), start=1):
@@ -451,13 +456,16 @@ def _polish_with_gemini(translator: "Translator", ja_lines: list[str], system_pr
 
         if result:
             polished_parts.append(result)
+        else:
+            failed_batches += 1
+            print(f"  第 {batch_no} 批重試 3 次仍然失敗，這一批會從整理稿中缺漏")
         context_tail = "\n".join(batch[-2:])
         print(f"  已處理第 {batch_no}/{total_batches} 批")
 
         if batch_no < total_batches:
             # 主動放慢節奏，盡量不要撞到免費額度的「每分鐘請求數」上限
             time.sleep(4.5)
-    return polished_parts
+    return polished_parts, failed_batches
 
 
 def _polish_with_local_model(
@@ -526,6 +534,7 @@ def rebuild_transcript_from_full_audio(
         system_prompt += "\n" + hint
 
     translation_only = False
+    failed_batches = 0
     if getattr(translator, "backend", TRANSLATION_BACKEND_GEMINI) == TRANSLATION_BACKEND_LOCAL:
         translation_only = translator.local.is_translation_only
         polished_parts = _polish_with_local_model(translator, ja_lines, glossary, system_prompt)
@@ -534,10 +543,10 @@ def rebuild_transcript_from_full_audio(
             print(f"本機模型服務無法使用，已保留完整錄音：{wav_path}")
             return None
     else:
-        polished_parts = _polish_with_gemini(translator, ja_lines, system_prompt)
+        polished_parts, failed_batches = _polish_with_gemini(translator, ja_lines, system_prompt)
 
     if not polished_parts:
-        print("翻譯模型沒有回傳任何內容，略過這份整理稿。")
+        print(f"翻譯模型沒有回傳任何內容，略過這份整理稿，已保留完整錄音：{wav_path}")
         return None
 
     if translation_only:
@@ -549,6 +558,11 @@ def rebuild_transcript_from_full_audio(
         summary = (
             "這份逐字稿是結束播放後，用完整錄音重新辨識、翻譯模型看過完整上下文潤過的版本，"
             "準確度會比即時觀看時看到的字幕更好，內容照實呈現、沒有自己刪減。"
+        )
+    if failed_batches:
+        summary += (
+            f"\n\n⚠️ 有 {failed_batches} 批整理失敗（可能撞到額度限制），這份整理稿有缺漏；"
+            f"完整錄音已保留在 {wav_path.name}，可以之後重新處理。"
         )
     out_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + "_notebooklm_style.md")
     header = [
@@ -564,7 +578,11 @@ def rebuild_transcript_from_full_audio(
     out_path.write_text("\n".join(header) + "\n\n".join(polished_parts) + "\n", encoding="utf-8")
 
     # 逐字稿已經整理好了，完整錄音本來就只是拿來重新辨識用、不是給人聽的，
-    # 用完就刪掉，不用留著佔硬碟空間
+    # 用完就刪掉，不用留著佔硬碟空間——但只要有任何一批整理失敗，就保留錄音，
+    # 不然缺漏的那幾批內容就永遠找不回來了
+    if failed_batches:
+        print(f"有 {failed_batches} 批整理失敗，已保留完整錄音：{wav_path}")
+        return out_path
     try:
         wav_path.unlink()
         print(f"逐字稿已產生，完整錄音（{wav_path.name}）已刪除。")
