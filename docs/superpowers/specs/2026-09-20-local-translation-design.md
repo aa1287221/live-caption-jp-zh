@@ -14,6 +14,8 @@ Ontime's `tools/relay/llama_runtime.py:452` demonstrates a local llama.cpp serve
 
 Adopt Ontime's local HTTP inference architecture, using a **general instruction-following model** behind llama.cpp's OpenAI-compatible `/v1/chat/completions`. Do not route existing prompts to Riva's `/v1/translate` or imply that translation-specific Riva reproduces arbitrary editorial instructions. Keep the local service external to this application; do not start/stop Ontime, download models, or alter its repository. A model swap preserves the application's feature contracts, not identical linguistic quality or latency.
 
+> **Superseded (start/stop only):** the "keep the local service external; never start/stop it" clause above is superseded by `2026-09-26-managed-llama-server-design.md`, which has the app start/stop a `llama-server` it spawned itself when nothing answers the configured base URL. Ontime/Ollama/anything else already running is still never touched. Downloading remains external to the app (a separate `setup_local_llm.py` script).
+
 ## Global constraints
 
 - Python 3.10 or newer; local transport uses only the standard library.

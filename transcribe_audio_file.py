@@ -21,7 +21,8 @@ ffmpeg 讀取）。金鑰讀取、模型設定都沿用 live_caption_gemini.py �
 執行前一樣要有 gemini_api_key.txt 或 GEMINI_API_KEY 環境變數。
 
 改用本機語言模型：加上 --backend local（或設定環境變數 TRANSLATION_BACKEND=local），
-先啟動 llama-server（見 README）；送出的編號批次提示詞、上下文跟 Gemini 版相同。
+設定好會自動啟動 llama-server（跑一次 setup_local_llm.py，見 README）；
+送出的編號批次提示詞、上下文跟 Gemini 版相同。
     python transcribe_audio_file.py 音檔路徑.mp3 --backend local
 """
 
