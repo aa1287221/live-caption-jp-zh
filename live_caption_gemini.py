@@ -1,6 +1,6 @@
 """
 live_caption_gemini.py
-跟 live_caption.py 完全一樣的內建擷取版，翻譯引擎可以在啟動畫面「⑥ 翻譯引擎」選：
+內建擷取版的即時中日對照字幕，翻譯引擎可以在啟動畫面「⑥ 翻譯引擎」選：
   - Gemini API（預設，GEMINI_MODEL）：雲端翻譯，需要 API 金鑰，行為跟以前完全一樣
   - 本機語言模型：呼叫 llama-server（跑一次 setup_local_llm.py 設定好就會自動啟動；
     也可以用自己先啟動的 llama-server 或 Ollama 等 OpenAI 相容服務），不需要金鑰、

@@ -124,7 +124,7 @@ llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ng
 **要選哪種模型？**
 
 - **想要跟 Gemini 一樣的效果（建議）**：用通用指令模型，例如 Qwen2.5-14B-Instruct 的
-  Q4_K_M GGUF（約 9 GB 顯存；`live_caption.py`（Ollama 版）用的也是這個系列）。本程式會送出
+  Q4_K_M GGUF（約 9 GB 顯存）。本程式會送出
   跟 Gemini 版一字不差的提示詞：即時字幕帶前一句上下文、事後整理會校正辨識錯字並潤稿。
   16 GB 顯卡要跟 Whisper large-v3 共用，模型太大會爆顯存
   （`setup_local_llm.py` 裝的預設 Gemma 4 26B-A4B QAT q4_0 實測峰值約 12.4 GB，含 Whisper）。

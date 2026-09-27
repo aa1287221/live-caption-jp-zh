@@ -56,7 +56,7 @@ python -m unittest discover -s tests
 ollama list
 ```
 
-如果清單裡有 `qwen2.5:14b`（本專案 `live_caption.py` 原本就是用它），直接設定環境變數，跳到 B-1：
+如果清單裡有 `qwen2.5:14b`，直接設定環境變數，跳到 B-1：
 
 ```powershell
 $env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434"
@@ -143,7 +143,7 @@ python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.tx
 >    被移動的程式碼（`_polish_with_gemini`、`_translate_cues_gemini`）內容應該跟 master 原本的迴圈相同，
 >    只有 user prompt 改成呼叫共用的 `_rebuild_user_prompt` / `_offline_user_prompt`；請確認這兩個函式產生的字串跟 master 原本的 inline 字串完全一致。
 >    `GeminiPathTests` 與 `PromptParityTests` 就是在鎖這件事。
-> 3. 確認 #2 的修正（刪除重複的 `DelayedAudioPlayer.stop()`）在四個 `live_caption*.py` 都在。
+> 3. 確認 #2 的修正（刪除重複的 `DelayedAudioPlayer.stop()`）在 `live_caption_gemini.py` 裡。
 > 4. 檢查 `local_llm.py`、`local_translation.py`、`llama_server.py`：只用標準函式庫、錯誤訊息不含 prompt 或模型輸出。
 >    `llama_server.py` 會在「沒有任何服務回應且設定了 `model_path`」時自動啟動一個 `llama-server` 子行程、
 >    結束時關掉它自己啟動的這個子行程，但它本身**不下載**任何東西——下載只發生在使用者主動執行的
