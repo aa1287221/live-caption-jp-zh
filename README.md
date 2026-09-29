@@ -1,297 +1,147 @@
-# 即時中日對照字幕工具（內建擷取版）
+# 即時中日對照字幕
 
-雙擊桌面捷徑「即時中日字幕」-> 選一個視窗（通常是你的瀏覽器）-> 自動延遲播放
-那個視窗的畫面+聲音，同時即時做日文語音辨識 + 翻譯成中文，字幕跟延遲畫面對時
-顯示，並存成逐字稿。
+看日文直播、廣播或會員影片時，即時在畫面下方顯示**日文原文 + 繁體中文翻譯**的個人工具。
 
-已針對 **Ryzen 7 5800X3D + RTX 5060 Ti** 調整為優先使用 GPU。
+選一個視窗（通常是瀏覽器），程式會把那個視窗的畫面和聲音**延遲幾秒播放**，同時在背景做日文語音辨識和翻譯。
+因為播放是延遲的，翻譯可以在畫面播到那一刻之前先算好，字幕就能對上說話的瞬間。結束後還會自動整理一份好讀的中日對照逐字稿。
 
-翻譯引擎可以在啟動畫面選（會記住上次的選擇）：
+> 這個工具只會擷取你自己電腦上、你選定的那個視窗的畫面和聲音，不會下載影片、不會存取網站帳號、不會繞過任何驗證機制。
 
-| 翻譯引擎 | 需要什麼 | 特色 |
-| --- | --- | --- |
-| **Gemini API**（預設） | Gemini API 金鑰 | 雲端大模型，會看前一句上下文、事後整理會校正辨識錯字並潤稿；有免費額度限制，逐字稿會送到 Google |
-| **本機語言模型** | 跑一次 `setup_local_llm.py`（見下方） | 設定好會自動啟動 `llama-server`；送出**跟 Gemini 完全相同的提示詞與流程**；不需要金鑰、沒有額度限制、逐字稿不離開你的電腦 |
+## 功能
 
-## 運作原理
+- **對時字幕**：左邊是延遲播放的畫面，下方是日文原文加中文翻譯，右邊是可以往回捲的完整逐字稿
+- **兩種翻譯引擎**，啟動時選：
+  - **Gemini API**（預設）：翻譯最自然，會參考前一句上下文；需要 API 金鑰，有免費額度限制
+  - **本機語言模型**：用 `llama-server` 或 Ollama 在自己的電腦上翻譯，不用金鑰、沒有額度限制，但品質通常不如 Gemini
+- **流暢的畫面**：用 Windows Graphics Capture 擷取，60 fps 的影片約可播到 55 fps
+- **自動切換音訊**：開始時自動把瀏覽器的聲音導到虛擬音訊線，關掉程式時自動切回原本的裝置
+- **事後整理逐字稿**：按下「開始錄製」後，結束時會用完整錄音重新辨識，再請翻譯模型校正錯字、統一用詞
+- **錄音保護**：事後整理只要有一批失敗，完整錄音就會保留，內容不會遺失
+- **專有名詞修正**：在 `glossary.json` 寫下常被聽錯的名字，翻譯時會自動改成正確寫法
 
-1. 你選好視窗後，程式開始持續擷取那個視窗的畫面+聲音，存進一個「幾秒鐘份量」的緩衝區
-2. 你實際看到/聽到的，是緩衝區裡「幾秒前」的畫面+聲音（延遲播放），不是即時畫面
-3. 因為程式同時也在即時處理最新進來的聲音做辨識+翻譯，翻譯字幕可以在延遲畫面播到
-   那一刻之前就先算好，達到「精準對上這個人開口瞬間」的效果
-4. 程式目前不會自動降低來源視窗的音量。若使用虛擬音訊線，程式會嘗試將來源程式的
-   輸出切到虛擬音訊線；若未使用虛擬音訊線，可能需要自行在 Windows 音量混音器調整
-   來源音量，避免即時聲音與延遲播放的聲音重疊
+## 快速開始
+
+需要：Windows 10/11、NVIDIA 顯示卡（建議 8 GB 以上顯存）、Python 3.10 以上。
+
+1. **安裝 CUDA 版 PyTorch**，再裝其他套件（詳見下方「安裝」第 1、2 步）
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **準備 Gemini API 金鑰**：到 https://aistudio.google.com/apikey 申請，把金鑰貼進程式資料夾的 `gemini_api_key.txt`
+3. **安裝虛擬音訊線和 SoundVolumeView**（見「安裝」第 4 步）。這一步可以不裝，但不裝的話會錄到電腦上所有聲音
+4. **執行**
+   ```bash
+   python live_caption_gemini.py
+   ```
+
+## 使用方式
+
+1. 在瀏覽器打開要看的影片
+2. 執行程式，出現「開始擷取前設定」視窗：
+   - **① 擷取視窗**：選瀏覽器
+   - **② 節目名稱**：可以留空，會寫在逐字稿開頭
+   - **③ 延遲秒數**：預設 6 秒。字幕常常來不及出現的話，就調長一點（例如 10～20 秒）
+   - **④ 音訊擷取來源**：選含 `CABLE` 的那一項
+   - **⑤ 延遲聲音**：選你的耳機或喇叭（**不要**選 CABLE）
+   - **⑥ 翻譯引擎**：Gemini API 或本機語言模型（會記住這次的選擇）
+3. 按開始後，**到瀏覽器重新整理一次影片頁面**，聲音才會改走虛擬音訊線（原因見「常見問題」）
+4. 想要事後整理版的逐字稿，就按上方的「⏺ 開始錄製」
+5. 看完直接關掉視窗。程式會把瀏覽器的聲音切回原本的裝置，並產生整理好的逐字稿
+
+### 使用時要注意
+
+- **不要把瀏覽器縮小**：Windows 不會繪製縮小的視窗，畫面會變黑；很多影片網站也會在視窗縮小時自動暫停。
+  可以用其他視窗蓋住它，或者把它放在副螢幕上。
+- **瀏覽器被其他視窗擋住時**，Chrome / Brave / Edge 預設會為了省電停止繪製影片。
+  用下面的參數啟動瀏覽器就不會了（對瀏覽器捷徑按右鍵 →「內容」→ 在「目標」欄位最後面加上）：
+  ```
+  --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows
+  ```
+  加完要**先完全關掉瀏覽器**（包括工作列右下角的背景程式），再用這個捷徑重新打開才會生效。
+
+### 產生的檔案
+
+都放在 `transcripts/`：
+
+| 檔案 | 內容 |
+| --- | --- |
+| `transcript_YYYYMMDD_HHMMSS.txt` | 即時字幕的原始紀錄（邊看邊寫入） |
+| `transcript_..._polished.md` | 結束後整理成好讀的中日對照版本 |
+| `transcript_..._notebooklm_style.md` | 有按「開始錄製」才會有：用完整錄音重新辨識，並由翻譯模型看過整段上下文、校正後的版本 |
+| `transcript_..._audio.wav` | 錄音暫存檔。整理成功後會自動刪除；有任何一批整理失敗時會保留 |
 
 ## 安裝
 
-### 1. 先裝有 CUDA 支援的 PyTorch（一定要照這步，不然會退回 CPU 模式）
+### 1. 安裝 CUDA 版 PyTorch（不做這步會退回 CPU，會非常慢）
 
-到 https://pytorch.org/get-started/locally/ 選：
-- PyTorch Build: Stable
-- OS: Windows / Package: Pip / Language: Python
-- Compute Platform: 選你系統目前安裝的 CUDA 版本（用 `nvidia-smi` 看驅動支援到多新的 CUDA）
-
-RTX 5060 Ti 是新一代 Blackwell 顯卡，需要 **CUDA 12.9 以上**的版本，例如：
+到 https://pytorch.org/get-started/locally/ 選 Stable / Windows / Pip / Python，Compute Platform 選你的驅動程式支援的 CUDA 版本（用 `nvidia-smi` 查）。
+RTX 50 系列（Blackwell）需要 **CUDA 12.9 以上**，例如：
 
 ```bash
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
+pip install torch --index-url https://download.pytorch.org/whl/cu130
 ```
 
-（如果官網有更新版本的 cuXXX 選項，以官網當下給的指令為準；裝完如果版本號不對，
-加 `--force-reinstall --no-deps` 強制換版本）
-
-裝完後可以先驗證：
+驗證（要印出 `True` 和你的顯卡名稱）：
 
 ```bash
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
-要印出 `True` 跟你的顯卡名稱，且不要有 `sm_120 is not compatible` 之類的警告才算成功。
-
-**用 cu130（CUDA 13）版 torch 時要多做一步**：語音辨識用的 faster-whisper 底層是 ctranslate2，
-它需要 CUDA 12 的 cuBLAS（`cublas64_12.dll`），但 cu130 版 torch 只附 CUDA 13 的版本。
-沒處理的話，第一次辨識就會出現
-`RuntimeError: Library cublas64_12.dll is not found or cannot be loaded`。
-裝完第 2 步的套件後執行：
+**用 cu130（CUDA 13）版 torch 時要多做一步**：語音辨識用的 faster-whisper 需要 CUDA 12 的 cuBLAS，
+不然第一次辨識就會出現 `cublas64_12.dll is not found`。裝完第 2 步後執行：
 
 ```bash
 pip install nvidia-cublas-cu12
 python -c "import glob,os,shutil,importlib.util as u; src=os.path.join(u.find_spec('nvidia.cublas').submodule_search_locations[0],'bin'); dst=u.find_spec('ctranslate2').submodule_search_locations[0]; [shutil.copy2(f,dst) for f in glob.glob(os.path.join(src,'cublas*64_12.dll'))]; print('copied to', dst)"
 ```
 
-這會把 `cublas64_12.dll`、`cublasLt64_12.dll` 複製到 ctranslate2 套件資料夾（它會從那裡載入）。
-已經另外裝了 CUDA 12 Toolkit、而且它的 `bin` 在 PATH 裡的話，可以跳過這步。
-
-### 2. 安裝其餘 Python 套件
+### 2. 安裝其他套件
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 準備翻譯引擎（兩個都可以裝，執行時再選）
+第一次執行時會自動下載 Whisper 語音辨識模型（約 1.5～3 GB）和 Silero VAD。
 
-#### A. Gemini API（預設）
+### 3. 準備翻譯引擎
 
-到 Google AI Studio（https://aistudio.google.com/apikey）申請免費的 API 金鑰，任選一種方式提供：
+**Gemini API（預設）**：到 https://aistudio.google.com/apikey 申請金鑰，擇一提供：
 
-- 在程式資料夾建立 `gemini_api_key.txt`，把金鑰貼進去存檔（雙擊捷徑/exe 的用法靠這個檔案）
-- 或在 PowerShell 設定：`$env:GEMINI_API_KEY = "你的金鑰"`
+- 在程式資料夾建立 `gemini_api_key.txt`，把金鑰貼進去（雙擊捷徑、exe 的用法要用這個）
+- 或在 PowerShell 設定 `$env:GEMINI_API_KEY = "你的金鑰"`
 
-金鑰不要寫進程式碼、不要貼給任何人（`*_api_key.txt` 已在 `.gitignore`）。免費額度大約
-每天 1,000 次、每分鐘 15 次請求，實際以 Google 官方頁面為準；撞到額度時即時字幕會跳過那一句。
+`gemini_api_key.txt` 已經加進 `.gitignore`，不會被上傳。金鑰不要寫進程式碼，也不要貼給別人。
+撞到免費額度時，即時字幕會跳過那一句。
 
-#### B. 本機語言模型（llama-server，設定好會自動啟動）
-
-**自動啟動（推薦，最簡單）**：執行一次 `setup_local_llm.py`，它會下載 llama-server（llama.cpp
-的 Windows CUDA 版執行檔）、預設模型（Gemma 4 26B-A4B QAT q4_0，實測顯存峰值約 12.4 GB、
-翻譯速度約 33 tok/s），驗證 sha256，解壓到 `tools/llama/`、模型放到 `models/`，並寫入
-`local_llm_server.json`：
-
-```bash
-python setup_local_llm.py            # 預設 CUDA 13.4；顯卡是 CUDA 12 系列就加 --cuda 12.4
-```
-
-設定好之後，選「本機語言模型」啟動主程式時，如果 `LOCAL_LLM_BASE_URL`（預設
-`http://127.0.0.1:8766`）沒有任何服務回應，程式會**自動啟動** `llama-server`、等它就緒
-（最多 `LOCAL_LLM_SPAWN_WAIT` 秒，預設 300）、結束時自動關掉它自己啟動的這個子行程
-（Windows 上還會放進 Job Object，就算程式異常結束也不會留下佔用顯存的殘留行程）——
-只有它自己啟動的服務才會被關掉，你已經在跑的 Ontime／Ollama／手動啟動的 llama-server
-永遠不會被動到。子行程的輸出會記到 `logs/llama-server.log`（啟動失敗時終端機也會印出
-結尾幾行方便排查）。**這支腳本是唯一會下載東西的地方，主程式本身從不下載任何模型或執行檔。**
-
-想自己調整啟動參數（例如 `--n-cpu-moe`、換更大的 `-c`），加 `--server-args`：
-
-```bash
-python setup_local_llm.py --server-args "-c 8192 -np 1 -ngl 99 --n-cpu-moe 26"
-```
-
-或直接編輯 `local_llm_server.json`（下次自動啟動就會套用，不用重跑 `setup_local_llm.py`）。
-換模型：`setup_local_llm.py --model-url <網址> --model-sha256 <sha256>`。
-
-**手動啟動（進階，或想用別的模型/伺服器）**：程式從不會去停掉一個已經在跑的服務，所以你也
-可以照舊自己啟動 `llama-server`、Ollama，或在 WSL 裡跑，程式偵測到已經有服務回應就會直接
-使用，不會重複啟動：
-
-```bash
-llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ngl 99
-```
-
-- `-c 8192`：context 長度。沒指定的話會用模型的最大值，會吃掉很多顯存
-- `-np 1`：只開一個 slot，讓每次請求都能用滿 context（本程式一次只送一個請求）
-- `-ngl 99`：盡量把模型放上 GPU
-
-**要選哪種模型？**
-
-- **想要跟 Gemini 一樣的效果（建議）**：用通用指令模型，例如 Qwen2.5-14B-Instruct 的
-  Q4_K_M GGUF（約 9 GB 顯存）。本程式會送出
-  跟 Gemini 版一字不差的提示詞：即時字幕帶前一句上下文、事後整理會校正辨識錯字並潤稿。
-  16 GB 顯卡要跟 Whisper large-v3 共用，模型太大會爆顯存
-  （`setup_local_llm.py` 裝的預設 Gemma 4 26B-A4B QAT q4_0 實測峰值約 12.4 GB，含 Whisper）。
-- **Riva-Translate 這類翻譯專用模型**：程式會自動偵測（模型名稱含 riva 或 Riva 的對話模板），
-  改用 Ontime-Translator 的單句翻譯格式、專有名詞用記號保護後換回你設定的顯示文字、
-  長句自動切段。速度快、顯存小，但**不會參考前一句、也不會校正或潤稿**，品質可能低於 Gemini；
-  啟動時終端機會提醒。
-
-已經裝了 Ollama 的話，也可以用它的 OpenAI 相容介面（沒有 `/props` 時會自動當成通用指令模型；
-這條路徑依 Ollama 的 OpenAI 相容 API 實作，主要測試對象是 llama-server）：
-
-```powershell
-$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434"
-$env:LOCAL_LLM_MODEL = "qwen2.5:14b"
-```
-
-llama-server 跑在 WSL 裡也可以：在 WSL 用 `--host 0.0.0.0` 啟動，Windows 端透過 WSL2 預設的
-localhost 轉送，通常就能用 `http://127.0.0.1:連接埠` 連到（連接埠要跟 `LOCAL_LLM_BASE_URL` 一致）。
+**本機語言模型（選用）**：見下方「本機語言模型」。
 
 ### 4. 安裝虛擬音訊線 + SoundVolumeView（建議）
 
-沒有虛擬音訊線的話，只能擷取「系統預設輸出裝置」：會錄到電腦上所有聲音，
-而且即時聲音會跟延遲播放的聲音疊在一起。建議裝以下兩個：
+沒有虛擬音訊線的話，只能擷取「系統預設輸出裝置」：會錄到電腦上所有的聲音，而且原本的聲音會和延遲播放的聲音疊在一起。
 
-1. **VB-Audio Virtual Cable**（免費驅動程式）：從 https://vb-audio.com/Cable/ 下載
-   `VBCABLE_Driver_Pack` 壓縮檔，解壓後**右鍵 `VBCABLE_Setup_x64.exe` →「以系統管理員身分執行」**
-   → 按「Install Driver」，裝完重開機。之後音訊裝置清單會多出 `CABLE Input` / `CABLE Output`。
-2. **NirSoft SoundVolumeView**（免安裝小工具）：從 https://www.nirsoft.net/utils/sound_volume_view.html
-   下載 64 位元版 zip，把 `SoundVolumeView.exe` 放到程式資料夾底下的 `tools\`
-   （路徑是 `tools\SoundVolumeView.exe`）。程式靠它在開始時自動把來源程式（瀏覽器）的
-   輸出切到 `CABLE Input`、結束時切回原本的裝置；沒放的話要自己到 Windows 音量混音器手動切。
-
-使用時在「④ 音訊擷取來源」選含 `CABLE` 字樣的那項，「⑤ 延遲聲音」選你的耳機或喇叭
-（不要選 CABLE）。
+1. **VB-Audio Virtual Cable**（免費）：從 https://vb-audio.com/Cable/ 下載 `VBCABLE_Driver_Pack`，
+   解壓後**對 `VBCABLE_Setup_x64.exe` 按右鍵 →「以系統管理員身分執行」**→「Install Driver」，裝完重開機。
+2. **NirSoft SoundVolumeView**（免安裝）：從 https://www.nirsoft.net/utils/sound_volume_view.html 下載 64 位元版，
+   把 `SoundVolumeView.exe` 放到 `tools\SoundVolumeView.exe`。
+   程式靠它在開始時把瀏覽器的輸出切到 `CABLE Input`、結束時切回原本的裝置
+   （開始時瀏覽器沒在播放聲音、查不到原本裝置的話，就切回系統預設的播放裝置）。
+   `tools\` 不會上傳到 GitHub，換電腦或換資料夾時要記得一起複製。
 
 ### 5. 打包成 exe、建立桌面捷徑（選用）
-
-「雙擊桌面捷徑」用的是 `launcher_gemini.py` 打包成的小 exe，它只是在同一個資料夾執行
-`python live_caption_gemini.py`，所以 Whisper、torch 等套件還是裝在你的 Python 裡，
-而且終端機輸入 `python` 要能跑到**裝了上面這些套件的那個 Python**。在程式資料夾執行：
 
 ```bash
 pip install pyinstaller
 pyinstaller --onefile --console --distpath . launcher_gemini.py
 ```
 
-會在程式資料夾產生 `launcher_gemini.exe`（`build\`、`launcher_gemini.spec` 可以刪掉）。
-對它按右鍵 →「傳送到」→「桌面（建立捷徑）」，再把捷徑改名成「即時中日字幕」就好。
-exe 必須跟 `live_caption_gemini.py` 放在同一個資料夾。
+會在程式資料夾產生 `launcher_gemini.exe`，對它按右鍵 →「傳送到」→「桌面（建立捷徑）」。
+這個 exe 只是在同一個資料夾執行 `python live_caption_gemini.py`，所以必須和程式放在一起，
+而且終端機輸入 `python` 時要能執行到裝了上面這些套件的那個 Python。
 
-## 執行
+## 專有名詞（glossary.json）
 
-雙擊桌面捷徑「即時中日字幕」，或手動執行：
-
-```bash
-python live_caption_gemini.py
-```
-
-流程：
-1. 開啟「開始擷取前設定」對話框，選擇要擷取的視窗（通常是瀏覽器）
-2. 在同一個對話框填寫節目/集數名稱（可留空）與延遲秒數（預設 6 秒），並選擇音訊輸入與輸出裝置
-3. 在「⑥ 翻譯引擎」選 Gemini API 或本機語言模型（會記住這次的選擇；
-   也可以用環境變數 `TRANSLATION_BACKEND=gemini` 或 `local` 指定預設值）
-4. 開始擷取，畫面上會看到：左邊延遲播放畫面、右邊可滾輪翻頁的完整逐字稿、
-   下方一整條字幕（日文原文 + 中文翻譯）
-
-- 翻譯引擎會在開始擷取前先確認可用（Gemini 金鑰、本機模型服務連線與暖機），
-  有問題會直接顯示原因並結束，不會動到你的音訊設定
-- 第一次執行會自動下載 Whisper 語音辨識模型跟 Silero VAD；GPU 預設模型是 `large-v3`
-  （約 3GB），CPU 預設是 `small`（小很多）；想要下載量小一點，設定
-  `WHISPER_MODEL=large-v3-turbo`（約 1.5GB，但實測在有雜音的片段容易有幻聽問題，見上方說明）
-- 逐字稿即時存到 `transcripts/transcript_YYYYMMDD_HHMMSS.txt`
-- 結束播放後自動整理成方便閱讀的 `transcript_YYYYMMDD_HHMMSS_polished.md`
-- 若曾開始錄製，結束後會用完整錄音重新辨識+翻譯，產生 `transcript_YYYYMMDD_HHMMSS_notebooklm_style.md`，
-  成功寫出後刪除暫存 WAV（有任何一批整理失敗、或本機模型服務中途停掉的話會保留 WAV，內容不會遺失）
-- 關掉視窗，或在終端機按 Ctrl+C 可結束
-
-## 本機語言模型：跟 Gemini 相同的地方與額外保護
-
-**相同**：提示詞（由同一組函式產生，測試逐字比對兩個引擎送出的內容）、前一句上下文、
-事後整理的校正+潤稿格式、`glossary.json`、所有輸出檔案格式與時間軸。
-
-**額外保護**（小模型比較容易出狀況，這些是 Gemini 版沒有的）：
-
-- 即時字幕逾時（預設 15 秒）就放棄那一句，不會拖慢後面的字幕；回覆是空白、照抄提示詞、
-  沒翻成中文或長得離譜時，會不帶前一句重翻一次
-- 事後整理的批次如果被截斷、超過 context、格式跑掉或逾時，會自動切成一半重送，
-  最後逐句補翻；編號缺漏會補翻，不會留空白也不會對錯行
-- 本機批次比 Gemini 小（20 句 vs 60/40 句），所以每批多附前 8 句當上下文
-- 服務停掉時連續失敗 3 次就停止（即時字幕暫停 30 秒後自動重試），不會卡住幾個小時
-
-### 設定（環境變數，都可以不設）
-
-| 環境變數 | 預設值 | 用途 |
-| --- | --- | --- |
-| `TRANSLATION_BACKEND` | （上次的選擇，否則 `gemini`） | `gemini` 或 `local` |
-| `LOCAL_LLM_BASE_URL` | `http://127.0.0.1:8766` | 服務根網址（不含 `/v1`、`/completion`） |
-| `LOCAL_LLM_MODE` | `auto` | `auto`（看 `/props` 自動判斷）、`instruct`（`/v1/chat/completions`）、`riva`（`/completion` + Riva 格式） |
-| `LOCAL_LLM_MODEL` | （空白） | 模型名稱；llama-server 不需要，Ollama 等多模型服務才需要 |
-| `LOCAL_LLM_LIVE_TIMEOUT` | `15` | 即時字幕單句逾時秒數 |
-| `LOCAL_LLM_TIMEOUT` | `120` | 批次整理單次請求逾時秒數 |
-| `LOCAL_LLM_STARTUP_WAIT` | `120` | 啟動時等待服務載入模型的秒數 |
-| `LOCAL_LLM_MAX_TOKENS` | `256` | 單句翻譯的輸出上限 |
-| `LOCAL_LLM_BATCH_LINES` | `20` | 事後整理每批句數（context 夠大、GPU 夠快可以調高） |
-| `LOCAL_LLM_BATCH_MAX_TOKENS` | `4096` | 批次輸出上限（也不會超過服務 context 的一半） |
-| `LOCAL_LLM_CONTEXT_LINES` | `8` | 每批附帶的前文句數 |
-| `LOCAL_LLM_SEGMENT_CHARS` | `120` | 翻譯專用模型的長句切段長度 |
-| `WHISPER_MODEL` | GPU `large-v3`／CPU `small` | 覆寫語音辨識模型大小（`large-v3-turbo`、`medium`… 都可以） |
-
-**自動啟動 llama-server 用**（`setup_local_llm.py` 會幫你把這些寫進 `local_llm_server.json`，
-一般不需要自己設環境變數）：
-
-| 環境變數 | JSON 欄位 | 預設值 | 用途 |
-| --- | --- | --- | --- |
-| `LOCAL_LLM_SERVER_EXE` | `server_exe` | `tools/llama/llama-server.exe`（`setup_local_llm.py` 會放在這裡） | llama-server 執行檔路徑 |
-| `LOCAL_LLM_MODEL_PATH` | `model_path` | （空白） | 要載入的 GGUF；**沒有設就不會自動啟動** |
-| `LOCAL_LLM_SERVER_ARGS` | `server_args` | `-c 8192 -np 1 -ngl 99 --jinja --reasoning off` | 額外啟動參數（字串或 JSON 陣列都可以） |
-| `LOCAL_LLM_SPAWN_WAIT` | `startup_wait` | `300` | 等自動啟動的服務就緒的秒數上限 |
-
-相對路徑會以程式資料夾為基準解析；自動啟動只支援 `LOCAL_LLM_BASE_URL` 是本機位址
-（`127.0.0.1`／`localhost`）的情況，遠端服務請自己啟動。
-
-PowerShell 範例：
-
-```powershell
-$env:TRANSLATION_BACKEND = "local"
-$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:8766"
-python live_caption_gemini.py
-```
-
-## 驗證本機模型「不低於 Gemini」
-
-換模型、換量化、調參數之後，用同一份樣本讓兩個引擎各跑一次，產生並排報告並自動判斷：
-
-```bash
-python compare_translation_backends.py transcripts/transcript_20260926_210000.txt --judge
-python compare_translation_backends.py 樣本.txt --backends local    # 只測本機模型（不需要金鑰）
-```
-
-- 樣本可以是一行一句的日文，或直接用即時字幕存下來的 `transcripts/transcript_*.txt`
-- 報告列出兩邊的問題率（空白、照抄提示、沒翻成中文、過長）、術語命中率、延遲、譯文相似度，
-  以及逐句並排對照；`--judge` 會請 Gemini 盲評每一句（A/B 順序隨機）
-- 全部通過才回傳 exit code 0：本機問題率不高於 Gemini 2% 以上、術語命中率不低於 Gemini 2% 以上、
-  有盲評時本機分數（勝 + 平手/2）≥ 0.45。Gemini 當評審若偏好自己的譯文只會讓本機更難過關
-- Gemini 呼叫之間預設間隔 4.5 秒以免撞到每分鐘額度（`--gemini-interval` 可調）
-
-檢查本機服務的 HTTP 介面是否符合程式需求（就緒檢查、模式判斷、截斷與 context 溢出訊號）：
-
-```bash
-# PowerShell：先 $env:LLAMA_SERVER_URL = "http://127.0.0.1:8766"
-python -m unittest discover -s tests -p test_llama_server_live.py -v
-```
-
-其餘自動測試不需要 GPU、音訊裝置或網路：`python -m unittest discover -s tests`
-
-完整的驗證清單（含 Windows 實機步驟與可以直接交給 Claude Code 的審查指示）見 `docs/VERIFY_DUAL_BACKEND.md`。
-
-## 專有名詞對照表（glossary.json）
-
-容易被聽錯的人名、節目名，可以編輯 `glossary.json` 增減，格式：
-
-```json
-"語音辨識寫出來的樣子": "正確寫法"
-```
-
-左邊填 Whisper 可能寫出來的樣子（包含聽錯的寫法），右邊填正確寫法；正確寫法本身也可以
-列一行、左右填一樣。例如：
+語音辨識常把人名聽錯，例如把「羊宮妃那」寫成「陽宮ひな」。在 `glossary.json` 寫下
+「辨識可能寫出來的樣子 → 正確寫法」，翻譯時就會附上一段說明，請翻譯模型改成正確寫法：
 
 ```json
 {
@@ -301,61 +151,121 @@ python -m unittest discover -s tests -p test_llama_server_live.py -v
 }
 ```
 
-翻譯時會附上一段溫和的補充說明（「聽寫可能寫成 ゆみやひな、陽宮ひな 的，正確寫法是
-羊宮妃那」），讓翻譯模型把聽錯的名字修正回來。改完**下次重新啟動**才會生效。
-（翻譯專用模型會用記號保護後換成右邊的文字。）
+- 左邊是聽寫可能出現的寫法，右邊是正確寫法；正確寫法本身也可以列一行，左右填一樣
+- 改完**下次啟動**才會生效
+- 第一次執行時會自動建立一份預設的清單。這個檔案不會上傳到 GitHub，自己改的內容也不會被 `git pull` 蓋掉
+- 這份清單**只給翻譯模型參考，不會交給 Whisper**：實測當成 Whisper 的提示詞時，名字雖然比較容易拼對，
+  卻會讓它整句漏聽（一段 3 分鐘的錄音漏了 8 句）
 
-**這份清單不會餵給 Whisper。** 實測當 Whisper 的 `initial_prompt` 時，名字雖然比較容易
-拼對，但會讓它整句漏聽（一段 3 分鐘的錄音漏了 8 句），名單跟內容無關時還會憑空冒出名字；
-改成由翻譯模型修正聽錯的名字，45 句盲評的翻譯品質不變或略好。
+## 本機語言模型
 
-`glossary.json` 現在是**不進版控的本機檔案**（已加進 `.gitignore`）；第一次執行會照
-`_DEFAULT_GLOSSARY` 自動建立一份，之後你自己編輯的內容不會被 `git pull` 覆蓋，也不用擔心
-不小心把自己的清單提交上去。
+不想花 Gemini 額度、或是想讓逐字稿完全不離開自己的電腦時可以使用。實測翻譯品質通常不如 Gemini
+（`qwen2.5:14b` 盲評 48 句：勝 6、平 2、負 40），比較適合在 Gemini 額度用完時當備用。
 
-## 準確度是怎麼拉高的
+**方法一：已經有 Ollama**，開程式前先設定：
 
-- **延遲播放**：翻譯有時間在畫面播到那一刻之前先算好（見上方「運作原理」）
-- **上下文翻譯**：每句話翻譯時會參考前一句，代名詞/省略主詞這類日文常見狀況準確度好很多
-  （Gemini 與本機通用指令模型都有；翻譯專用模型沒有）
-- **斷句停頓門檻**（700ms）：避免說話中間換氣被過早切開
-- **Whisper 模型**：GPU 預設使用 `large-v3`，CPU 則使用 `small`（可用 `WHISPER_MODEL` 環境
-  變數覆寫；`large-v3-turbo` 實測在有雜音的片段會出現重複片語與罐頭字句的幻覺，改用
-  `large-v3` 沒有這個問題，代價是每句多花約 0.3 秒）
-- **事後重新整理**：錄下的完整音訊會重新辨識，翻譯模型看過整批上下文後校正錯字、統一用詞
+```powershell
+$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434"
+$env:LOCAL_LLM_MODEL = "qwen2.5:14b"
+```
 
-如果覺得字幕還是常常「等太久才跳出來」，可以把 `live_caption_gemini.py` 裡的
-`SILENCE_END_MS`（目前 700）調小一點，抓「準確度」跟「即時性」之間你想要的平衡點；
-或是啟動時把延遲秒數設久一點，給翻譯更多緩衝時間。
+**方法二：讓程式自動啟動 llama-server**。先執行一次安裝腳本，它會下載 llama.cpp 的 Windows CUDA 版和預設模型
+（Gemma 4 26B-A4B QAT q4_0，連同 Whisper 顯存峰值約 12.4 GB），驗證 sha256 後寫入 `local_llm_server.json`：
+
+```bash
+python setup_local_llm.py            # 預設 CUDA 13.4；CUDA 12 系列顯卡加 --cuda 12.4
+```
+
+之後選「本機語言模型」時，如果沒有服務在跑，程式會自動啟動 `llama-server`，關掉程式時也一併關掉。
+已經在跑的服務（Ollama、自己手動啟動的 llama-server）會直接使用，不會被關掉。
+這支腳本是唯一會下載東西的地方，主程式本身不會下載模型或執行檔。
+
+**方法三：自己啟動 llama-server**：
+
+```bash
+llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ngl 99
+```
+
+**模型怎麼選**：想要接近 Gemini 的效果，用通用指令模型（例如 Qwen2.5-14B-Instruct、Gemma 4），
+程式會送出和 Gemini 完全相同的提示詞。Riva-Translate 這類翻譯專用模型會被自動偵測，
+改成逐句翻譯：速度快、顯存小，但不看前後文、也不會校正潤稿。
+
+本機模式另外加了一些保護：單句 15 秒沒翻完就放棄、回覆有問題會重翻、批次被截斷會自動切小重送、
+服務停掉時快速失敗並保留錄音。
+
+## 設定（環境變數，都可以不設）
+
+| 環境變數 | 預設值 | 用途 |
+| --- | --- | --- |
+| `TRANSLATION_BACKEND` | 上次的選擇，否則 `gemini` | `gemini` 或 `local` |
+| `WHISPER_MODEL` | GPU `large-v3`、CPU `small` | 語音辨識模型，例如 `large-v3-turbo`、`medium` |
+| `GEMINI_API_KEY` | 讀 `gemini_api_key.txt` | Gemini 金鑰 |
+| `LOCAL_LLM_BASE_URL` | `http://127.0.0.1:8766` | 本機模型服務網址 |
+| `LOCAL_LLM_MODEL` | 空白 | 模型名稱（Ollama 需要，llama-server 不需要） |
+| `LOCAL_LLM_MODE` | `auto` | `auto`、`instruct` 或 `riva` |
+| `LOCAL_LLM_LIVE_TIMEOUT` | `15` | 即時字幕單句逾時秒數 |
+| `LOCAL_LLM_TIMEOUT` | `120` | 事後整理單次請求逾時秒數 |
+| `LOCAL_LLM_STARTUP_WAIT` | `120` | 等你自己啟動的服務載入模型的秒數 |
+| `LOCAL_LLM_BATCH_LINES` | `20` | 事後整理每批句數 |
+
+自動啟動 llama-server 的設定（`setup_local_llm.py` 會寫進 `local_llm_server.json`，通常不用自己設）：
+`LOCAL_LLM_SERVER_EXE`、`LOCAL_LLM_MODEL_PATH`（沒設就不會自動啟動）、`LOCAL_LLM_SERVER_ARGS`、
+`LOCAL_LLM_SPAWN_WAIT`（預設 300 秒）。其餘進階參數見 `local_translation.py`、`llama_server.py`。
+
+## 調整準確度與即時性
+
+- **字幕常常來不及出現**：把啟動時的延遲秒數調長
+- **字幕常常漏句**：GPU 預設的 Whisper 模型是 `large-v3`。有些內容（例如背景音樂比較大聲的直播）
+  它會把整段判斷成沒人說話而丟掉，可以試試 `WHISPER_MODEL=large-v3-turbo`，速度也比較快。
+  反過來說，turbo 在雜音多的片段比較容易出現重複片語之類的幻覺，兩個都可以試試看哪個適合你看的節目
+- **一句話常被切成兩半**：把 `live_caption_gemini.py` 裡的 `SILENCE_END_MS`（目前 700）調大；
+  想要字幕更快出現就調小
 
 ## 常見問題
 
-- **找不到 loopback 裝置**：確認 Windows 音效設定裡有正常輸出裝置在播放聲音，音量沒靜音
-- **`cublas64_12.dll is not found or cannot be loaded`**：用的是 cu130 版 torch，照「安裝」第 1 步
-  最後那段補上 CUDA 12 的 cuBLAS
-- **④ 沒有 CABLE 可以選**：VB-Audio Virtual Cable 還沒裝，或裝完還沒重開機（見「安裝」第 4 步）
-- **用 CABLE 擷取但字幕都不出來（全程靜音）**：自動切換輸出裝置不會影響「已經在播放」的分頁，
-  到瀏覽器重新整理影片頁面（或暫停再播放）聲音才會改走 CABLE；還是沒聲音的話，確認
-  `tools\SoundVolumeView.exe` 存在，或到 Windows 音量混音器手動把瀏覽器輸出設成 `CABLE Input`
-- **顯卡沒被吃到**：重新確認 torch 是否裝成 CUDA 版（`pip show torch` 版本號結尾
-  應該是 `+cu130` 之類，而不是純 CPU 版）
-- **想換 Whisper 模型**：設定環境變數 `WHISPER_MODEL`（例如 `medium`），不用改程式碼
-  （GPU 預設已經是 `large-v3`；8GB 顯卡可能會爆顯存，16GB 應該沒問題）
-- **視窗清單找不到你要的視窗**：確認那個視窗沒有被最小化、且視窗大小夠大
-  （太小的視窗會被過濾掉，避免清單塞滿一堆工具列小圖示）
-- **畫面黑屏**：理論上跟 OBS 視窗擷取用同一套技術，先前測試過對這類會員影音平台
-  不會黑屏；如果真的遇到黑屏，把情況告訴我再調整
-- **Gemini 翻譯失敗**：確認金鑰正確；型號名稱錯誤時終端機會列出這把金鑰可用的型號
-- **本機模型連不上**：
-  - 沒設定自動啟動（沒跑過 `setup_local_llm.py`、`local_llm_server.json` 裡沒有
-    `model_path`）：先照上面「自動啟動」跑一次 `setup_local_llm.py`，或自己啟動一個
-    `llama-server`／Ollama，確認網址與連接埠跟 `LOCAL_LLM_BASE_URL` 一致
-  - 設定了自動啟動但還是連不上：檢查終端機印出的錯誤訊息是不是找不到 `server_exe`
-    或 `model_path`（訊息會直接寫出是哪個路徑）；也可以看 `logs/llama-server.log`
-    的結尾幾行，通常是顯存不足、模型檔壞掉或參數打錯
-  - 已有服務在跑但沒被偵測到：確認它真的在 `LOCAL_LLM_BASE_URL` 這個位址上回應
-    `/health`；模型還在載入時程式會等待（自動啟動的服務最多等 `LOCAL_LLM_SPAWN_WAIT`
-    秒，預設 300；使用你自己啟動的服務則是 `LOCAL_LLM_STARTUP_WAIT` 秒，預設 120）
-- **本機模型翻得慢、字幕跟不上**：換小一點或量化更多的模型、確認 `-ngl` 有把模型放上 GPU，
-  或把啟動時的延遲秒數調長
-- **終端機提示 context 太小**：用較大的 `-c`（例如 8192）重新啟動 llama-server
+- **用 CABLE 擷取但字幕都不出來（全程靜音）**：切換瀏覽器的輸出裝置後，只有「新開始播放」的聲音會改走 CABLE。
+  到瀏覽器重新整理影片頁面（或暫停再播放）就好。還是不行的話，確認 `tools\SoundVolumeView.exe` 存在，
+  或到 Windows 音量混音器手動把瀏覽器輸出設成 `CABLE Input`
+- **關掉程式後瀏覽器沒有聲音**：到 Windows 音量混音器把瀏覽器的輸出改回你的耳機或喇叭。
+  正常關閉時程式會自動切回，這通常是程式被強制結束才會發生
+- **畫面變黑或停住**：瀏覽器被縮小了，或是被擋住時停止繪製，見「使用時要注意」。
+  程式會偵測 Windows Graphics Capture 是否一直抓到黑畫面，是的話會自動改用舊的擷取方式
+- **畫面卡卡的**：確認用的是最新版（Windows Graphics Capture 擷取）；影片本身只有 30 fps 的話，擷取出來也只有 30 fps
+- **中文字幕那行出現日文**：Gemini 偶爾會照抄原文，程式會自動重翻一次；重翻還是日文就只能跳過那句
+- **④ 沒有 CABLE 可以選**：VB-Audio Virtual Cable 還沒裝，或裝完還沒重開機
+- **`cublas64_12.dll is not found`**：用的是 cu130 版 torch，照「安裝」第 1 步最後那段補上 CUDA 12 的 cuBLAS
+- **顯卡沒被用到**：`pip show torch` 的版本號結尾應該是 `+cu130` 之類，而不是 CPU 版
+- **視窗清單找不到要的視窗**：視窗不能是縮小的狀態，而且要夠大（太小的視窗會被過濾掉）
+- **Gemini 翻譯失敗**：確認金鑰正確；模型名稱不對時，終端機會列出這把金鑰可以用的模型
+- **本機模型連不上**：確認 `LOCAL_LLM_BASE_URL` 和服務的網址、連接埠一致；自動啟動失敗時，
+  終端機會寫出是哪個路徑找不到，也可以看 `logs/llama-server.log` 的最後幾行
+  （通常是顯存不足、模型檔壞掉或參數打錯）
+- **本機模型翻得慢、字幕跟不上**：換小一點的模型、確認 `-ngl` 有把模型放上 GPU，或把延遲秒數調長
+
+## 開發與測試
+
+```bash
+python -m unittest discover -s tests      # 不需要 GPU、音訊裝置或網路
+```
+
+比較 Gemini 和本機模型的翻譯品質（換模型、調參數之後用）：
+
+```bash
+python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.txt --judge
+python compare_translation_backends.py 樣本.txt --backends local     # 只測本機模型
+```
+
+`--judge` 會請 Gemini 盲評每一句（A/B 順序隨機），會用到 Gemini 額度。
+完整的驗證流程見 `docs/VERIFY_DUAL_BACKEND.md`。
+
+### 檔案結構
+
+| 檔案 | 用途 |
+| --- | --- |
+| `live_caption_gemini.py` | 主程式（檔名保留 gemini 是為了相容舊的捷徑，其實兩種翻譯引擎都在這裡） |
+| `screen_capture_worker.py` | 在獨立行程裡擷取畫面，透過共享記憶體傳回主程式 |
+| `startup_gui.py` | 「開始擷取前設定」視窗 |
+| `local_llm.py`、`local_translation.py` | 本機語言模型的連線和翻譯流程 |
+| `llama_server.py`、`setup_local_llm.py` | 自動啟動 llama-server、下載模型 |
+| `compare_translation_backends.py` | 翻譯品質比較工具 |
+| `launcher_gemini.py` | 打包成 exe 用的啟動器 |
