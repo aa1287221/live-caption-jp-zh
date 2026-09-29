@@ -406,6 +406,22 @@ class GlossaryFileTests(TranslationBackendTestCase):
 			self.assertTrue(missing_path.exists())
 			self.assertEqual(json.loads(missing_path.read_text(encoding="utf-8")), self.app._DEFAULT_GLOSSARY)
 
+	def test_glossary_hint_groups_misheard_spellings_under_the_correct_name(self):
+		hint = self.app.glossary_hint({"羊宮妃那": "羊宮妃那", "ゆみやひな": "羊宮妃那", "陽宮ひな": "羊宮妃那", "HOOOOPE": "HOOOOPE"})
+		self.assertIn("- 羊宮妃那（聽寫可能寫成：ゆみやひな、陽宮ひな）", hint)
+		self.assertIn("- HOOOOPE\n", hint + "\n")
+		self.assertNotIn("完全保留原文", hint)
+
+	def test_glossary_is_not_used_as_a_whisper_prompt(self):
+		translator, _ = self.gemini_translator(lambda contents, n: "中文")
+		asr = mock.Mock()
+		asr.transcribe.return_value = ([FakeSegment(0, "田中です。")], None)
+		with tempfile.TemporaryDirectory() as temp_dir:
+			wav_path = Path(temp_dir) / "transcript_20260926_010203_audio.wav"
+			wav_path.write_bytes(b"RIFF")
+			self.app.rebuild_transcript_from_full_audio(wav_path, asr, translator, {"田中": "田中"}, "節目")
+		self.assertIsNone(asr.transcribe.call_args.kwargs.get("initial_prompt"))
+
 
 class WorkflowWiringTests(TranslationBackendTestCase):
 	def test_worker_reuses_injected_translator_without_constructing_another(self):
