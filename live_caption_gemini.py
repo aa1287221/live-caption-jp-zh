@@ -643,13 +643,11 @@ def duck_process_volume(pid: int, level: float = VOLUME_DUCK_LEVEL):
         print(f"自動調整音量失敗（不影響其他功能，可以自己手動調整）：{e}")
 
 
-def get_app_output_device(process_name: str) -> str | None:
-    """查詢某個程式目前實際輸出到哪個裝置（用 SoundVolumeView 匯出目前的音訊工作階段）。
-
-    回傳裝置名稱；查不到、或 SoundVolumeView 不存在的話回傳 None。
-    """
+def _sound_volume_view_rows() -> list[dict]:
+    """用 SoundVolumeView 匯出目前所有音訊裝置與程式工作階段，每列是一個 dict。
+    SoundVolumeView 不存在或匯出失敗時回傳空清單。"""
     if not SOUND_VOLUME_VIEW_PATH.exists():
-        return None
+        return []
     try:
         import subprocess
         import csv
@@ -662,14 +660,57 @@ def get_app_output_device(process_name: str) -> str | None:
                 timeout=10, capture_output=True,
             )
             if not csv_path.exists():
-                return None
+                return []
             with open(csv_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                for row in csv.reader(f):
-                    # 欄位順序：Name, Type, Direction, Device Name, ...
-                    if len(row) > 3 and process_name.lower() in row[0].lower() and row[1] == "Application":
-                        return row[3] or None
+                return list(csv.DictReader(f))
     except Exception:
-        pass
+        return []
+
+
+def _endpoint_id(item_id: str) -> str:
+    """Item ID 開頭那段（到第一個 | 之前）是播放裝置本身的 ID，程式工作階段也帶著它"""
+    return (item_id or "").split("|", 1)[0]
+
+
+def get_app_output_device(process_name: str, rows: list[dict] | None = None) -> str | None:
+    """查詢某個程式目前實際輸出到哪個裝置。
+
+    回傳 SoundVolumeView 的「Command-Line Friendly ID」（例如
+    「Realtek(R) Audio／Device／Realtek HD Audio 2nd output／Render」，實際用反斜線分隔），可以直接拿去切回去；
+    同一張音效卡有好幾個輸出時也不會搞混。那個程式現在沒在播放聲音（沒有工作階段）、
+    或 SoundVolumeView 不存在時回傳 None。
+    """
+    rows = _sound_volume_view_rows() if rows is None else rows
+    target = process_name.lower()
+    for row in rows:
+        # 工作階段那一列的 Name 是程式的顯示名稱（例如「Brave」），不是 brave.exe，
+        # 要用 Process Path 比對
+        if row.get("Type") != "Application" or row.get("Direction") != "Render":
+            continue
+        if Path(row.get("Process Path", "")).name.lower() != target:
+            continue
+        endpoint = _endpoint_id(row.get("Item ID", ""))
+        for device in rows:
+            if device.get("Type") == "Device" and _endpoint_id(device.get("Item ID", "")) == endpoint:
+                return device.get("Command-Line Friendly ID") or None
+    return None
+
+
+def get_default_output_device(rows: list[dict] | None = None) -> str | None:
+    """系統目前的預設播放裝置（Command-Line Friendly ID），查不到回傳 None"""
+    rows = _sound_volume_view_rows() if rows is None else rows
+    for row in rows:
+        if row.get("Type") == "Device" and row.get("Direction") == "Render" and row.get("Default") == "Render":
+            return row.get("Command-Line Friendly ID") or None
+    return None
+
+
+def find_output_device(name: str, rows: list[dict] | None = None) -> str | None:
+    """用裝置名稱（例如「CABLE Input」）找播放裝置的 Command-Line Friendly ID"""
+    rows = _sound_volume_view_rows() if rows is None else rows
+    for row in rows:
+        if row.get("Type") == "Device" and row.get("Direction") == "Render" and row.get("Name") == name:
+            return row.get("Command-Line Friendly ID") or None
     return None
 
 
@@ -2056,8 +2097,14 @@ def main():
             source_process_name = None
 
         if source_process_name and SOUND_VOLUME_VIEW_PATH.exists():
-            original_output_device = get_app_output_device(source_process_name)
-            if set_app_output_device(source_process_name, "CABLE Input (VB-Audio Virtual Cable)"):
+            sound_rows = _sound_volume_view_rows()
+            cable_device = find_output_device("CABLE Input", sound_rows) or "CABLE Input"
+            # 瀏覽器現在沒在播放聲音的話查不到（None），結束時就改切回系統預設裝置；
+            # 上次程式沒正常結束、瀏覽器還停在 CABLE 的話，也當成查不到，不要切回 CABLE
+            original_output_device = get_app_output_device(source_process_name, sound_rows)
+            if original_output_device == cable_device:
+                original_output_device = None
+            if set_app_output_device(source_process_name, cable_device):
                 print(f"已自動把 {source_process_name} 的輸出裝置切到虛擬音訊線。")
                 print("提醒：切換裝置指令不會影響「已經在播放」的分頁——")
                 print("請去瀏覽器重新整理一次影片頁面（或暫停再重新播放），聲音才會真的改道過去，不然會抓到全程靜音、字幕不會跑出來。")
@@ -2151,13 +2198,14 @@ def main():
         if worker is not None:
             worker.stop()
 
-        if source_process_name:
-            # 結束時把來源程式的輸出裝置切回原本的，不留下你要自己手動改回去的麻煩
-            if original_output_device:
-                if set_app_output_device(source_process_name, original_output_device):
-                    print(f"已把 {source_process_name} 的輸出裝置切回原本的「{original_output_device}」。")
+        if source_process_name and SOUND_VOLUME_VIEW_PATH.exists():
+            # 結束時把來源程式的輸出裝置切回原本的；開始時查不到原本的裝置（瀏覽器
+            # 那時沒在播放），就切回系統預設的播放裝置，不留下要自己手動改回去的麻煩
+            restore_device = original_output_device or get_default_output_device()
+            if restore_device and set_app_output_device(source_process_name, restore_device):
+                print(f"已把 {source_process_name} 的輸出裝置切回「{restore_device}」。")
             else:
-                print(f"沒能記住 {source_process_name} 原本的輸出裝置，可能需要自己在音量混音器裡切回來。")
+                print(f"沒辦法自動切回 {source_process_name} 的輸出裝置，可能需要自己在音量混音器裡切回來。")
 
         worker.join(timeout=5)  # 等背景執行緒真的寫完檔案，再去讀來整理
         # 完整錄音的 WAV 檔要等 AudioCapture 執行緒真的跑完、把檔案關閉寫入磁碟，
