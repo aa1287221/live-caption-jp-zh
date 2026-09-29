@@ -12,7 +12,7 @@ faster-whisper 這些大型函式庫也一起重新 import 一次，白白拖慢
 
 為什麼要搬成獨立 process（而不是原本的執行緒）：
 Python 同一個「行程」裡，不管開幾條執行緒，同一時間真正在執行 Python
-位元碼的還是只有一個（GIL 限制）。擷取畫面（PrintWindow + 縮放/轉色）這種
+位元碼的還是只有一個（GIL 限制）。擷取畫面（抓圖 + 縮放/轉色）這種
 吃 CPU 的工作，如果跟語音辨識、翻譯、UI 擠在同一個行程裡搶執行權，遇到大家
 都想動的瞬間就會互相卡到，這就是隨機雜音/卡頓的來源——工作管理員的總 CPU
 用量看起來不高，因為那是全部核心平均後的數字，實際上是「排隊等執行權」被卡住，
@@ -79,12 +79,163 @@ def _capture_once(hwnd: int):
     return img
 
 
+# 平均亮度低於這個值就當成「全黑」；連續黑這麼久，就拿 PrintWindow 抓一張比對，
+# 確認是 WGC 拿不到畫面（不是影片本身剛好是黑畫面），才切換過去
+BLACK_MEAN_THRESHOLD = 3.0
+BLACK_FALLBACK_SEC = 2.0
+
+
+class _SlotWriter:
+    """把一張 BGRA 畫面縮放、轉成 RGB，寫進共享記憶體的下一格。
+    WGC 的回呼執行緒跟 PrintWindow 迴圈都用這一個，寫入規則只有一份。"""
+
+    def __init__(self, shm_name, slot_nbytes, meta_array, latest_slot, max_width):
+        self.shm = shared_memory.SharedMemory(name=shm_name)
+        self.slots = np.ndarray((NUM_SLOTS, slot_nbytes), dtype=np.uint8, buffer=self.shm.buf)
+        self.slot_nbytes = slot_nbytes
+        self.meta_array = meta_array
+        self.latest_slot = latest_slot
+        self.max_width = max_width
+        self.write_slot = 0
+
+    def write(self, bgra: np.ndarray) -> None:
+        h, w = bgra.shape[:2]
+        if w > self.max_width:
+            scale = self.max_width / w
+            bgra = cv2.resize(
+                bgra, (self.max_width, max(1, int(h * scale))), interpolation=cv2.INTER_AREA,
+            )
+        rgb = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGB)
+        h, w = rgb.shape[:2]
+        nbytes = rgb.nbytes
+        if nbytes > self.slot_nbytes:
+            # 理論上不會發生（共享記憶體照 max_width 的正方形上限配置，
+            # 一般影片視窗不會比它還高），真的遇到就跳過這張避免寫爆記憶體
+            print(f"[擷取行程] 畫面 {w}x{h} 超出共享記憶體容量，跳過這一張")
+            return
+        self.slots[self.write_slot, :nbytes] = rgb.reshape(-1)
+        idx = self.write_slot * 3
+        self.meta_array[idx] = h
+        self.meta_array[idx + 1] = w
+        self.meta_array[idx + 2] = time.time()
+        self.latest_slot.value = self.write_slot
+        self.write_slot = (self.write_slot + 1) % NUM_SLOTS
+
+    def close(self):
+        self.shm.close()
+
+
+def _is_black(bgra: np.ndarray) -> bool:
+    return float(bgra[::16, ::16, :3].mean()) < BLACK_MEAN_THRESHOLD
+
+
+def _run_wgc(hwnd, writer, hwnd_shared, stop_event, pause_event) -> str:
+    """用 Windows Graphics Capture 擷取，直到結束、切換視窗或需要退回 PrintWindow。
+
+    WGC 是影片每換一格就主動送一張過來（跟 OBS 視窗擷取同一套），不像
+    PrintWindow 要自己定時去抓：定時抓的時間點跟影片換格對不上，就會漏格、
+    重複，看起來一頓一頓；PrintWindow 抓一張 Brave 畫面還要 20ms 以上，
+    60fps 的影片根本抓不完。
+
+    回傳 "stop"（要結束）、"switch"（視窗換了，重新開始）、"fallback"（WGC
+    一直拿到黑畫面，但 PrintWindow 抓得到內容，改用 PrintWindow）、"error"。
+    """
+    from windows_capture import WindowsCapture
+
+    state = {"black_since": None, "fallback": False}
+
+    capture = WindowsCapture(cursor_capture=False, draw_border=False, window_hwnd=hwnd)
+
+    @capture.event
+    def on_frame_arrived(frame, control):
+        if stop_event.is_set() or hwnd_shared.value != hwnd or state["fallback"]:
+            control.stop()
+            return
+        if pause_event.is_set():
+            return
+        try:
+            bgra = frame.frame_buffer
+            if _is_black(bgra):
+                now = time.time()
+                if state["black_since"] is None:
+                    state["black_since"] = now
+                elif now - state["black_since"] >= BLACK_FALLBACK_SEC:
+                    state["black_since"] = now
+                    probe = _capture_once(hwnd)
+                    if probe is not None and not _is_black(probe):
+                        state["fallback"] = True
+                        control.stop()
+                        return
+            else:
+                state["black_since"] = None
+            writer.write(bgra)
+        except Exception as e:
+            print(f"[擷取行程] 處理擷取畫面時發生錯誤：{e}")
+
+    @capture.event
+    def on_closed():
+        pass
+
+    try:
+        control = capture.start_free_threaded()
+    except Exception as e:
+        print(f"[擷取行程] 無法使用 Windows Graphics Capture，改用 PrintWindow：{e}")
+        return "error"
+
+    while not control.is_finished():
+        if stop_event.is_set() or hwnd_shared.value != hwnd:
+            control.stop()
+            break
+        time.sleep(0.05)
+    try:
+        control.wait()
+    except Exception:
+        pass
+
+    if stop_event.is_set():
+        return "stop"
+    if state["fallback"]:
+        print("[擷取行程] Windows Graphics Capture 一直抓到黑畫面，改用 PrintWindow 擷取。")
+        return "fallback"
+    if hwnd_shared.value != hwnd:
+        return "switch"
+    # 視窗被關掉之類的情況，WGC 會自己結束；稍等一下再重試
+    time.sleep(0.5)
+    return "switch"
+
+
+def _run_printwindow(hwnd, writer, hwnd_shared, stop_event, pause_event, target_fps) -> str:
+    """PrintWindow 輪詢擷取（舊方法，WGC 用不了時的備案）。回傳 "stop" 或 "switch"。"""
+    interval = 1.0 / target_fps
+    while not stop_event.is_set():
+        if hwnd_shared.value != hwnd:
+            return "switch"
+        loop_start = time.time()
+        if pause_event.is_set():
+            time.sleep(0.1)
+            continue
+        try:
+            buf = _capture_once(hwnd)
+            if buf is not None:
+                writer.write(buf)
+        except Exception as e:
+            print(f"[擷取行程] 處理擷取畫面時發生錯誤：{e}")
+        remaining = interval - (time.time() - loop_start)
+        if remaining > 0:
+            time.sleep(remaining)
+    return "stop"
+
+
 def run_capture_process(
     hwnd_shared, max_width, target_fps, shm_name, slot_nbytes, meta_array,
     latest_slot, stop_event, pause_event,
 ):
     """在獨立行程裡執行的主迴圈。跟主行程（語音辨識/翻譯/UI）完全分開跑，
     各自有自己的直譯器和 GIL，彼此不會互搶執行權。
+
+    預設用 Windows Graphics Capture；某個視窗 WGC 一直抓到黑畫面（但
+    PrintWindow 抓得到），那個視窗就改用 PrintWindow。切換到別的視窗時，
+    會重新先試 WGC。
 
     shm_name/slot_nbytes：主行程建立好的共享記憶體名稱、每一格的大小上限。
     meta_array：長度 NUM_SLOTS*3 的 double 陣列，依序存每一格的 (height, width,
@@ -104,49 +255,18 @@ def run_capture_process(
     except Exception:
         pass
 
-    shm = shared_memory.SharedMemory(name=shm_name)
-    slots = np.ndarray((NUM_SLOTS, slot_nbytes), dtype=np.uint8, buffer=shm.buf)
-    write_slot = 0
-
+    writer = _SlotWriter(shm_name, slot_nbytes, meta_array, latest_slot, max_width)
+    printwindow_hwnds = set()  # 這些視窗 WGC 會抓到黑畫面，直接用 PrintWindow
     try:
-        interval = 1.0 / target_fps
         while not stop_event.is_set():
-            loop_start = time.time()
-            if pause_event.is_set():
-                time.sleep(0.1)
-                continue
-            try:
-                hwnd = hwnd_shared.value
-                buf = _capture_once(hwnd)
-                if buf is not None:
-                    h, w = buf.shape[:2]
-                    if w > max_width:
-                        scale = max_width / w
-                        buf = cv2.resize(
-                            buf, (max_width, max(1, int(h * scale))),
-                            interpolation=cv2.INTER_AREA,
-                        )
-                    rgb = cv2.cvtColor(buf, cv2.COLOR_BGRA2RGB)
-                    h, w = rgb.shape[:2]
-                    nbytes = rgb.nbytes
-                    if nbytes > slot_nbytes:
-                        # 理論上不會發生（共享記憶體照 max_width 的正方形上限配置，
-                        # 一般影片視窗不會比它還高），真的遇到就跳過這張避免寫爆記憶體
-                        print(f"[擷取行程] 畫面 {w}x{h} 超出共享記憶體容量，跳過這一張")
-                    else:
-                        slots[write_slot, :nbytes] = rgb.reshape(-1)
-                        idx = write_slot * 3
-                        meta_array[idx] = h
-                        meta_array[idx + 1] = w
-                        meta_array[idx + 2] = time.time()
-                        latest_slot.value = write_slot
-                        write_slot = (write_slot + 1) % NUM_SLOTS
-            except Exception as e:
-                print(f"[擷取行程] 處理擷取畫面時發生錯誤：{e}")
-
-            elapsed = time.time() - loop_start
-            remaining = interval - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
+            hwnd = hwnd_shared.value
+            if hwnd in printwindow_hwnds:
+                result = _run_printwindow(hwnd, writer, hwnd_shared, stop_event, pause_event, target_fps)
+            else:
+                result = _run_wgc(hwnd, writer, hwnd_shared, stop_event, pause_event)
+                if result in ("fallback", "error"):
+                    printwindow_hwnds.add(hwnd)
+            if result == "stop":
+                break
     finally:
-        shm.close()
+        writer.close()

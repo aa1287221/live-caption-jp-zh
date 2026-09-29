@@ -195,6 +195,24 @@ class GeminiPathTests(TranslationBackendTestCase):
 		self.assertEqual(self.sleeps, [])
 		self.assertIn("免費額度", self.printed_text())
 
+	def test_gemini_echoing_japanese_is_retried_once_without_context(self):
+		source = "スタッフさんがペコリとしてくださっております"
+		translator, calls = self.gemini_translator(lambda contents, n: source if n == 1 else "工作人員向我們鞠躬了")
+		self.assertEqual(translator.translate_with_context("こんばんは", source), "工作人員向我們鞠躬了")
+		self.assertEqual(len(calls), 2)
+		self.assertEqual(calls[1]["contents"], "請把這一句翻成繁體中文：\n" + source)
+
+	def test_gemini_keeps_first_reply_when_retry_is_still_japanese(self):
+		source = "スタッフさんがペコリとしてくださっております"
+		translator, calls = self.gemini_translator(lambda contents, n: source)
+		self.assertEqual(translator.translate_with_context("", source), source)
+		self.assertEqual(len(calls), 2)
+
+	def test_gemini_chinese_reply_is_not_retried(self):
+		translator, calls = self.gemini_translator(lambda contents, n: "大家晚安")
+		self.assertEqual(translator.translate_with_context("", "こんばんは"), "大家晚安")
+		self.assertEqual(len(calls), 1)
+
 	def test_missing_gemini_sdk_explains_how_to_fix_it(self):
 		with mock.patch.dict(sys.modules, {"google": None, "google.genai": None}):
 			with self.assertRaisesRegex(RuntimeError, "pip install google-genai"):
