@@ -175,6 +175,13 @@ class LocalLLMClientContractTests(unittest.TestCase):
 		self.assertTrue(caught.exception.unreachable)
 		self.assertEqual(len(opener.calls), 1)
 
+	def test_refused_connection_is_classified_as_connection(self):
+		client, opener = self.make_client(urllib.error.URLError(ConnectionRefusedError("refused")))
+		with self.assertRaisesRegex(LocalLLMError, "連線") as caught:
+			client.complete("prompt")
+		self.assertEqual(caught.exception.kind, "connection")
+		self.assertTrue(caught.exception.unreachable)
+
 	def test_context_overflow_is_classified_for_smaller_batches(self):
 		body = json.dumps({"error": {"code": 400, "message": "request (5001 tokens) exceeds the available context size (2048 tokens), try increasing it", "type": "exceed_context_size_error"}}).encode()
 		error = urllib.error.HTTPError("http://127.0.0.1:8766/v1/chat/completions", 400, "bad", {}, io.BytesIO(body))
@@ -352,9 +359,12 @@ class LocalLLMClientLoopbackTests(unittest.TestCase):
 			probe.bind(("127.0.0.1", 0))
 			port = probe.getsockname()[1]
 		client = LocalLLMClient(base_url=f"http://127.0.0.1:{port}", timeout=2)
+		sleep = mock.Mock()
 		with self.assertRaises(LocalLLMError) as caught:
-			client.ensure_ready()
-		self.assertEqual(caught.exception.kind, "connection")
+			client.ensure_ready(sleep=sleep)
+		# Windows retries the SYN to a closed loopback port past the 2 s timeout, so the kind can be "timeout".
+		self.assertTrue(caught.exception.unreachable)
+		sleep.assert_not_called()
 	def test_redirect_is_rejected(self):
 		FakeLlamaServer.redirect = True
 		client = LocalLLMClient(base_url=self.base_url(), timeout=2, mode="riva")
