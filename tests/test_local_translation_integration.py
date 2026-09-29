@@ -407,6 +407,34 @@ class GlossaryFileTests(TranslationBackendTestCase):
 			self.assertEqual(json.loads(missing_path.read_text(encoding="utf-8")), self.app._DEFAULT_GLOSSARY)
 
 
+SOUND_ROWS = [
+	{"Name": "喇叭", "Type": "Device", "Direction": "Render", "Default": "Render",
+	 "Item ID": "{0.0.0.00000000}.{aaa}", "Command-Line Friendly ID": "FxSound Audio Enhancer\\Device\\喇叭\\Render"},
+	{"Name": "Realtek HD Audio 2nd output", "Type": "Device", "Direction": "Render", "Default": "",
+	 "Item ID": "{0.0.0.00000000}.{bbb}", "Command-Line Friendly ID": "Realtek(R) Audio\\Device\\Realtek HD Audio 2nd output\\Render"},
+	{"Name": "CABLE Input", "Type": "Device", "Direction": "Render", "Default": "",
+	 "Item ID": "{0.0.0.00000000}.{ccc}", "Command-Line Friendly ID": "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render"},
+	# 程式工作階段那一列的 Name 是顯示名稱（Brave），不是 brave.exe
+	{"Name": "Brave", "Type": "Application", "Direction": "Render", "Default": "",
+	 "Item ID": "{0.0.0.00000000}.{bbb}|\\Device\\HarddiskVolume3\\Program Files\\Brave\\brave.exe%b{0}|1%b42",
+	 "Process Path": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"},
+]
+
+
+class AudioRoutingTests(TranslationBackendTestCase):
+	def test_app_device_is_found_by_process_path_not_display_name(self):
+		self.assertEqual(self.app.get_app_output_device("brave.exe", SOUND_ROWS),
+			"Realtek(R) Audio\\Device\\Realtek HD Audio 2nd output\\Render")
+
+	def test_app_without_a_session_returns_none(self):
+		self.assertIsNone(self.app.get_app_output_device("chrome.exe", SOUND_ROWS))
+
+	def test_default_and_named_devices(self):
+		self.assertEqual(self.app.get_default_output_device(SOUND_ROWS), "FxSound Audio Enhancer\\Device\\喇叭\\Render")
+		self.assertEqual(self.app.find_output_device("CABLE Input", SOUND_ROWS), "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render")
+		self.assertIsNone(self.app.find_output_device("不存在的裝置", SOUND_ROWS))
+
+
 class WorkflowWiringTests(TranslationBackendTestCase):
 	def test_worker_reuses_injected_translator_without_constructing_another(self):
 		injected = mock.Mock()
