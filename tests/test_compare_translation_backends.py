@@ -136,23 +136,6 @@ class MainTests(unittest.TestCase):
 	def test_judge_requires_both_backends(self):
 		self.assertEqual(compare.main([str(self.samples), "--backends", "local", "--judge"], translator_factory=lambda name: None, glossary_loader=dict), 2)
 
-	def test_offline_mode_uses_the_offline_batch_functions(self):
-		offline = types.SimpleNamespace(
-			_OFFLINE_SYSTEM_PROMPT="SYSTEM", TRANSLATION_BACKEND_LOCAL="local",
-			glossary_hint=lambda glossary: "HINT",
-			_translate_cues_local=mock.Mock(side_effect=lambda translator, cues, glossary, system: [cue.update(zh="本機" + cue["ja"]) for cue in cues]),
-			_translate_cues_gemini=mock.Mock(side_effect=lambda translator, cues, system: [cue.update(zh="雲端" + cue["ja"]) for cue in cues]),
-		)
-		translators = {"gemini": FakeTranslator("gemini", {}), "local": FakeTranslator("local", {})}
-		with mock.patch("builtins.print"):
-			code = compare.main(
-				[str(self.samples), "--mode", "offline", "--out", str(Path(self.temp_dir.name) / "o.md"), "--max-problem-gap", "1"],
-				translator_factory=lambda name: translators[name], glossary_loader=lambda: self.glossary, offline_module=offline,
-			)
-		self.assertEqual(code, 0)
-		self.assertEqual(offline._translate_cues_local.call_args.args[3], "SYSTEM\nHINT")
-		self.assertEqual([cue["ja"] for cue in offline._translate_cues_gemini.call_args.args[1]], ["ゆみやひなです。", "今日はいい天気ですね。", "またね。"])
-
 
 if __name__ == "__main__":
 	unittest.main()

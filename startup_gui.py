@@ -1,7 +1,6 @@
 """
 startup_gui.py
-共用的「開始擷取前設定」圖形化視窗，給 live_caption.py / live_caption_gemini.py /
-live_caption_openrouter.py 共用，取代原本一個一個在終端機打數字/文字的流程。
+「開始擷取前設定」圖形化視窗，給 live_caption_gemini.py 用，取代原本一個一個在終端機打數字/文字的流程。
 
 只負責「畫面 + 收集使用者選了什麼」，不碰擷取視窗、音訊裝置、翻譯 API 這些
 實際邏輯——那些還是留在各自的主程式裡，這裡回傳的只是純資料（索引/字串），

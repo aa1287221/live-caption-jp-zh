@@ -21,8 +21,8 @@ python -m unittest discover -s tests
 | 測試 | 驗證什麼 |
 | --- | --- |
 | `GeminiPathTests` | Gemini 的提示詞、temperature 0.3、額度跳過、60/40 句批次、20 秒重試、4.5 秒節奏都跟 master 相同 |
-| `PromptParityTests` | 本機引擎送出的 system/user 提示詞跟 Gemini 逐字相同（即時字幕、事後整理、預先轉錄），預先轉錄的輸出檔也相同 |
-| `LocalBackendTests` | 不會載入 Google SDK、服務連不上時的提示、截斷自動切批、服務中途停掉保留 WAV、編號缺漏補翻 |
+| `PromptParityTests` | 本機引擎送出的 system/user 提示詞跟 Gemini 逐字相同（即時字幕、事後整理） |
+| `LocalBackendTests` | 不會載入 Google SDK、服務連不上時的提示、截斷自動切批、服務中途停掉保留 WAV |
 | `test_local_llm.py` | HTTP 協定：chat/completion 兩種格式、`/props` 自動判斷、`/health` 等待、截斷與 context 溢出分類、不走 proxy、拒絕 redirect |
 
 作者端另外做過的驗證（供參考）：
@@ -56,7 +56,7 @@ python -m unittest discover -s tests
 ollama list
 ```
 
-如果清單裡有 `qwen2.5:14b`（本專案 `live_caption.py` 原本就是用它），直接設定環境變數，跳到 B-1：
+如果清單裡有 `qwen2.5:14b`，直接設定環境變數，跳到 B-1：
 
 ```powershell
 $env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434"
@@ -120,7 +120,6 @@ cd C:\llm\llama.cpp
 4. 失敗情境：
    - 關掉 llama-server 再啟動程式 → 應該在動到音訊設定前就顯示「無法使用本機語言模型」並結束
    - 錄製中途關掉 llama-server → 字幕變空白但不會卡住；結束後顯示「已保留完整錄音」，WAV 沒被刪
-5. 預先轉錄：`python transcribe_audio_file.py 音檔.mp3 --backend local`，再用「讀取預先轉錄字幕檔」播放
 
 ### C. 品質是否「不低於 Gemini」（最重要的判斷依據）
 
@@ -128,7 +127,6 @@ cd C:\llm\llama.cpp
 
 ```bash
 python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.txt --judge --limit 60
-python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.txt --mode offline --limit 60
 ```
 
 - 會產生 `..._backend_report.md`：兩個引擎的問題率、術語命中率、延遲、逐句並排
@@ -145,7 +143,7 @@ python compare_translation_backends.py transcripts/transcript_XXXXXXXX_XXXXXX.tx
 >    被移動的程式碼（`_polish_with_gemini`、`_translate_cues_gemini`）內容應該跟 master 原本的迴圈相同，
 >    只有 user prompt 改成呼叫共用的 `_rebuild_user_prompt` / `_offline_user_prompt`；請確認這兩個函式產生的字串跟 master 原本的 inline 字串完全一致。
 >    `GeminiPathTests` 與 `PromptParityTests` 就是在鎖這件事。
-> 3. 確認 #2 的修正（刪除重複的 `DelayedAudioPlayer.stop()`）在四個 `live_caption*.py` 都在。
+> 3. 確認 #2 的修正（刪除重複的 `DelayedAudioPlayer.stop()`）在 `live_caption_gemini.py` 裡。
 > 4. 檢查 `local_llm.py`、`local_translation.py`、`llama_server.py`：只用標準函式庫、錯誤訊息不含 prompt 或模型輸出。
 >    `llama_server.py` 會在「沒有任何服務回應且設定了 `model_path`」時自動啟動一個 `llama-server` 子行程、
 >    結束時關掉它自己啟動的這個子行程，但它本身**不下載**任何東西——下載只發生在使用者主動執行的

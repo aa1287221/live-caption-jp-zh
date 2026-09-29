@@ -1,12 +1,12 @@
 """
 live_caption_gemini.py
-跟 live_caption.py 完全一樣的內建擷取版，翻譯引擎可以在啟動畫面「⑥ 翻譯引擎」選：
+內建擷取版的即時中日對照字幕，翻譯引擎可以在啟動畫面「⑥ 翻譯引擎」選：
   - Gemini API（預設，GEMINI_MODEL）：雲端翻譯，需要 API 金鑰，行為跟以前完全一樣
   - 本機語言模型：呼叫 llama-server（跑一次 setup_local_llm.py 設定好就會自動啟動；
     也可以用自己先啟動的 llama-server 或 Ollama 等 OpenAI 相容服務），不需要金鑰、
     不用額度、逐字稿不會離開你的電腦；送出的提示詞、前一句上下文、事後重新辨識+
-    潤稿、預先轉錄的流程都跟 Gemini 版相同（設定方式見下方與 README）
-檔名保留 gemini，既有的捷徑、啟動器、transcribe_audio_file.py 都不用改。
+    潤稿的流程都跟 Gemini 版相同（設定方式見下方與 README）
+檔名保留 gemini，既有的捷徑、啟動器都不用改。
 
 使用情境：
   你是合法訂閱會員，在瀏覽器裡播放影片。這支程式只會擷取你電腦上「你自己選定的
@@ -172,8 +172,7 @@ GEMINI_MODEL = "gemini-3.5-flash-lite"
 GEMINI_API_KEY_FILE = Path(__file__).parent / "gemini_api_key.txt"
 
 # 翻譯引擎：gemini（預設，跟以前一樣）或 local（本機語言模型，見檔案開頭說明）。
-# 啟動畫面會記住上次的選擇；環境變數 TRANSLATION_BACKEND 可以指定預設值，
-# transcribe_audio_file.py 也吃同一個環境變數（或用 --backend 參數）。
+# 啟動畫面會記住上次的選擇；環境變數 TRANSLATION_BACKEND 可以指定預設值。
 TRANSLATION_BACKEND_GEMINI = "gemini"
 TRANSLATION_BACKEND_LOCAL = "local"
 TRANSLATION_BACKENDS = (TRANSLATION_BACKEND_GEMINI, TRANSLATION_BACKEND_LOCAL)
@@ -430,8 +429,13 @@ def _rebuild_user_prompt(batch: list[str], context_tail: str) -> str:
 	) + "請處理這一批句子：\n" + "\n".join(batch)
 
 
-def _polish_with_gemini(translator: "Translator", ja_lines: list[str], system_prompt: str) -> list[str]:
+def _polish_with_gemini(
+    translator: "Translator", ja_lines: list[str], system_prompt: str
+) -> tuple[list[str], int]:
+    """回傳 (整理好的段落, 重試 3 次仍失敗的批數)。失敗批數大於 0 時，呼叫端
+    要保留完整錄音，不然那幾批的內容就永遠找不回來了。"""
     polished_parts = []
+    failed_batches = 0
     context_tail = ""
     total_batches = (len(ja_lines) + _POLISH_CHUNK_LINES - 1) // _POLISH_CHUNK_LINES
     for batch_no, i in enumerate(range(0, len(ja_lines), _POLISH_CHUNK_LINES), start=1):
@@ -451,13 +455,16 @@ def _polish_with_gemini(translator: "Translator", ja_lines: list[str], system_pr
 
         if result:
             polished_parts.append(result)
+        else:
+            failed_batches += 1
+            print(f"  第 {batch_no} 批重試 3 次仍然失敗，這一批會從整理稿中缺漏")
         context_tail = "\n".join(batch[-2:])
         print(f"  已處理第 {batch_no}/{total_batches} 批")
 
         if batch_no < total_batches:
             # 主動放慢節奏，盡量不要撞到免費額度的「每分鐘請求數」上限
             time.sleep(4.5)
-    return polished_parts
+    return polished_parts, failed_batches
 
 
 def _polish_with_local_model(
@@ -526,18 +533,19 @@ def rebuild_transcript_from_full_audio(
         system_prompt += "\n" + hint
 
     translation_only = False
+    failed_batches = 0
     if getattr(translator, "backend", TRANSLATION_BACKEND_GEMINI) == TRANSLATION_BACKEND_LOCAL:
         translation_only = translator.local.is_translation_only
         polished_parts = _polish_with_local_model(translator, ja_lines, glossary, system_prompt)
         if polished_parts is None:
-            # 服務中途停掉：保留完整錄音，之後可以用 transcribe_audio_file.py 重新處理
+            # 服務中途停掉：保留完整錄音，之後可以重新處理
             print(f"本機模型服務無法使用，已保留完整錄音：{wav_path}")
             return None
     else:
-        polished_parts = _polish_with_gemini(translator, ja_lines, system_prompt)
+        polished_parts, failed_batches = _polish_with_gemini(translator, ja_lines, system_prompt)
 
     if not polished_parts:
-        print("翻譯模型沒有回傳任何內容，略過這份整理稿。")
+        print(f"翻譯模型沒有回傳任何內容，略過這份整理稿，已保留完整錄音：{wav_path}")
         return None
 
     if translation_only:
@@ -549,6 +557,11 @@ def rebuild_transcript_from_full_audio(
         summary = (
             "這份逐字稿是結束播放後，用完整錄音重新辨識、翻譯模型看過完整上下文潤過的版本，"
             "準確度會比即時觀看時看到的字幕更好，內容照實呈現、沒有自己刪減。"
+        )
+    if failed_batches:
+        summary += (
+            f"\n\n⚠️ 有 {failed_batches} 批整理失敗（可能撞到額度限制），這份整理稿有缺漏；"
+            f"完整錄音已保留在 {wav_path.name}，可以之後重新處理。"
         )
     out_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + "_notebooklm_style.md")
     header = [
@@ -564,7 +577,11 @@ def rebuild_transcript_from_full_audio(
     out_path.write_text("\n".join(header) + "\n\n".join(polished_parts) + "\n", encoding="utf-8")
 
     # 逐字稿已經整理好了，完整錄音本來就只是拿來重新辨識用、不是給人聽的，
-    # 用完就刪掉，不用留著佔硬碟空間
+    # 用完就刪掉，不用留著佔硬碟空間——但只要有任何一批整理失敗，就保留錄音，
+    # 不然缺漏的那幾批內容就永遠找不回來了
+    if failed_batches:
+        print(f"有 {failed_batches} 批整理失敗，已保留完整錄音：{wav_path}")
+        return out_path
     try:
         wav_path.unlink()
         print(f"逐字稿已產生，完整錄音（{wav_path.name}）已刪除。")
@@ -572,37 +589,6 @@ def rebuild_transcript_from_full_audio(
         print(f"整理完成，但刪除完整錄音時發生錯誤（不影響逐字稿內容）：{e}")
 
     return out_path
-
-
-def load_cue_file(cue_path: Path) -> dict | None:
-    """讀取 transcribe_audio_file.py 產生的時間軸字幕檔。失敗回傳 None。"""
-    try:
-        data = json.loads(cue_path.read_text(encoding="utf-8"))
-        cues = data.get("cues", [])
-        if not cues:
-            print(f"{cue_path} 裡沒有任何字幕內容。")
-            return None
-        return data
-    except Exception as e:
-        print(f"讀取字幕檔失敗：{e}")
-        return None
-
-
-def push_cues_to_queues(
-    cues: list[dict],
-    caption_queue: "queue.Queue",
-    transcript_queue: "queue.Queue",
-    playback_start_time: float,
-):
-    """把整份預先轉錄好的字幕，依照「播放開始的那一刻」換算成實際該顯示的
-    時間點，一次全部塞進兩個 queue——不用另外寫一個即時處理迴圈，畫面/
-    逐字稿視窗本來就有的 FIFO 顯示邏輯會自己照 release_at 排隊顯示。
-    """
-    for c in cues:
-        release_at = playback_start_time + c["start"] + DISPLAY_DELAY_SEC
-        ja, zh = c["ja"], c.get("zh", "")
-        caption_queue.put((release_at, ja, zh))
-        transcript_queue.put((release_at, ja, zh))
 
 
 # ============================================================
@@ -1101,15 +1087,11 @@ class AudioCapture(threading.Thread):
         device: dict | None = None,
         record_path: "Path | None" = None,
         pause_state: "PauseState | None" = None,
-        enable_vad: bool = True,
     ):
         super().__init__(daemon=True)
         self.utterance_queue = utterance_queue
         self.audio_ring = audio_ring
         self.pause_state = pause_state
-        # 讀取預先轉錄好字幕檔的模式不需要即時辨識，關掉 VAD 省下語音偵測的
-        # 運算，也不會再把任何東西塞進 utterance_queue（反正沒有 Worker 會去讀）
-        self.enable_vad = enable_vad
         self.pa = pyaudio.PyAudio()
         # 記住指定的裝置名稱，串流意外斷線要重連時，優先找回同一個裝置
         # （不然重連可能會抓回系統預設輸出，跟原本指定的虛擬音訊線對不上）
@@ -1125,18 +1107,15 @@ class AudioCapture(threading.Thread):
         self._wav_writer = None
         self._wav_lock = threading.Lock()
 
-        self.vad_model = None
-        self.vad_iterator = None
-        if self.enable_vad:
-            print("載入語音活動偵測模型（Silero VAD，第一次執行會自動下載）...")
-            self.vad_model = load_silero_vad()
-            self.vad_iterator = VADIterator(
-                self.vad_model,
-                sampling_rate=TARGET_SR,
-                threshold=VAD_THRESHOLD,
-                min_silence_duration_ms=SILENCE_END_MS,
-                speech_pad_ms=VAD_SPEECH_PAD_MS,
-            )
+        print("載入語音活動偵測模型（Silero VAD，第一次執行會自動下載）...")
+        self.vad_model = load_silero_vad()
+        self.vad_iterator = VADIterator(
+            self.vad_model,
+            sampling_rate=TARGET_SR,
+            threshold=VAD_THRESHOLD,
+            min_silence_duration_ms=SILENCE_END_MS,
+            speech_pad_ms=VAD_SPEECH_PAD_MS,
+        )
         self._stop = threading.Event()
 
     def start_recording(self) -> bool:
@@ -1281,11 +1260,6 @@ class AudioCapture(threading.Thread):
                 if self._wav_writer is not None:
                     pcm16 = np.clip(audio_16k * 32767, -32768, 32767).astype(np.int16)
                     self._wav_writer.writeframes(pcm16.tobytes())
-
-            if not self.enable_vad:
-                # 讀取預先轉錄字幕檔的模式：只需要音訊進 audio_ring 給延遲播放，
-                # 不用即時辨識，跳過整段 VAD／斷句處理
-                continue
 
             pending = np.concatenate([pending, audio_16k])
 
@@ -1652,7 +1626,6 @@ class PlayerWindow:
         pause_state: "PauseState | None" = None,
         screen_capture: "ScreenCapture | None" = None,
         audio_capture: "AudioCapture | None" = None,
-        cue_playback: "dict | None" = None,
     ):
         self.root = root            # 整個視窗；控制按鈕列橫跨全寬，掛在這裡
         self.container = container  # PanedWindow 左邊那塊；畫面/字幕只蓋在這個範圍
@@ -1661,9 +1634,6 @@ class PlayerWindow:
         self.pause_state = pause_state
         self.screen_capture = screen_capture
         self.audio_capture = audio_capture
-        # 讀取預先轉錄字幕檔模式才會有這個：{"cues": [...], "transcript_queue": ...}
-        self.cue_playback = cue_playback
-        self._cue_synced = False
 
         self._pending_caption = []  # [(release_at, ja_lines, zh)]
         self._next_caption_switch = 0.0  # 目前這句字幕最早可以幾點被換掉
@@ -1675,28 +1645,17 @@ class PlayerWindow:
         control_frame.pack(fill="x", side="top")
         control_frame.pack_propagate(False)
 
-        if self.cue_playback is not None:
-            # 讀取預先轉錄字幕檔模式：多一個「開始計時」鍵，按下的那一刻要跟
-            # 瀏覽器裡按下播放的那一刻對齊，之後字幕才會準確跟著音訊進度跑
-            self.sync_btn = tk.Button(
-                control_frame, text="▶ 開始計時（跟播放對齊）", font=("Microsoft JhengHei", 10),
-                command=self._on_start_sync, bg="#2e7d32", fg="white",
-            )
-            self.sync_btn.pack(side="left", padx=6, pady=4)
-
         self.pause_btn = tk.Button(
             control_frame, text="⏸ 暫停", font=("Microsoft JhengHei", 10),
             command=self._on_toggle_pause,
         )
         self.pause_btn.pack(side="left", padx=6, pady=4)
 
-        if self.cue_playback is None:
-            # 已經有預先轉錄好的完整逐字稿了，不需要再另外錄音重新辨識一次
-            self.record_btn = tk.Button(
-                control_frame, text="⏺ 開始錄製", font=("Microsoft JhengHei", 10),
-                command=self._on_toggle_recording,
-            )
-            self.record_btn.pack(side="left", padx=6, pady=4)
+        self.record_btn = tk.Button(
+            control_frame, text="⏺ 開始錄製", font=("Microsoft JhengHei", 10),
+            command=self._on_toggle_recording,
+        )
+        self.record_btn.pack(side="left", padx=6, pady=4)
 
         switch_btn = tk.Button(
             control_frame, text="🔄 切換視窗", font=("Microsoft JhengHei", 10),
@@ -1739,22 +1698,6 @@ class PlayerWindow:
             wrap = max(200, event.width - 40)
             self.ja_label.config(wraplength=wrap)
             self.zh_label.config(wraplength=wrap)
-
-    def _on_start_sync(self):
-        if self.cue_playback is None or self._cue_synced:
-            return
-        # 按下的這一刻要跟瀏覽器裡按下播放的那一刻對齊，之後所有字幕的顯示
-        # 時間點都是從這一刻換算出來的，按太早/太晚會讓字幕整批提早或延後
-        playback_start_time = time.time()
-        push_cues_to_queues(
-            self.cue_playback["cues"],
-            self.caption_queue,
-            self.cue_playback["transcript_queue"],
-            playback_start_time,
-        )
-        self._cue_synced = True
-        self.sync_btn.config(text="✓ 已對齊", state="disabled")
-        print(f"已對齊播放時間，共 {len(self.cue_playback['cues'])} 句字幕已排入顯示佇列。")
 
     def _on_toggle_pause(self):
         if self.pause_state is None:
@@ -1947,9 +1890,7 @@ def main():
     import pygetwindow as gw
     import win32process
 
-    cue_data = None
-
-    last = load_last_settings(SETTINGS_PATH)
+    last =load_last_settings(SETTINGS_PATH)
 
     candidates = [
         w for w in gw.getAllWindows()
@@ -1998,9 +1939,8 @@ def main():
         input_device_names=input_names,
         output_device_names=output_names,
         default_delay=last.get("delay", DISPLAY_DELAY_SEC),
-        default_episode_title=(cue_data.get("episode_title") if cue_data else None) or last.get("episode_title", ""),
-        # 讀取預先轉錄字幕檔模式不會用到翻譯，就不顯示翻譯引擎選項
-        model_options=backend_labels if cue_data is None else None,
+        default_episode_title=last.get("episode_title", ""),
+        model_options=backend_labels,
         model_label="翻譯引擎（本機語言模型設定好會自動啟動 llama-server，見 README）",
         default_window_index=index_of_name(window_titles, last.get("window_title")),
         default_input_index=index_of_name(input_names, last.get("input_device")),
@@ -2050,13 +1990,11 @@ def main():
 
     # 先把翻譯引擎建好（Gemini 金鑰、本機模型服務有問題的話，在動到來源程式的音訊
     # 輸出設定之前就先結束，不會留下要自己手動切回來的設定）
-    translator = None
-    if cue_data is None:
-        try:
-            translator = Translator(translation_backend)
-        except RuntimeError as e:
-            print(f"翻譯引擎初始化失敗：{e}")
-            sys.exit(1)
+    try:
+        translator = Translator(translation_backend)
+    except RuntimeError as e:
+        print(f"翻譯引擎初始化失敗：{e}")
+        sys.exit(1)
 
     using_virtual_cable = bool(input_device and "CABLE" in input_device["name"].upper())
     original_output_device = None
@@ -2103,38 +2041,16 @@ def main():
     pause_state = PauseState()
     screen_capture = ScreenCapture(hwnd, frame_buffer, pause_state=pause_state)
 
-    worker = None
-    raw_audio_path = None
-    cue_log_path = None
-
-    if cue_data is not None:
-        # 讀取預先轉錄字幕檔模式：不需要即時辨識，AudioCapture 只負責延遲播放
-        # 用的音訊緩衝（enable_vad=False），不錄音、不跑 VAD；逐字稿內容已經
-        # 全部確定了，一次直接寫完，不用像即時模式那樣靠 Worker 一句一句累積
-        audio_capture = AudioCapture(
-            utterance_queue, audio_ring=audio_ring, device=input_device,
-            record_path=None, pause_state=pause_state, enable_vad=False,
-        )
-        cue_log_path = TRANSCRIPT_DIR / f"transcript_{date_str}.txt"
-        with open(cue_log_path, "w", encoding="utf-8") as f:
-            if episode_title:
-                f.write(f"#TITLE: {episode_title}\n\n")
-            for c in cue_data["cues"]:
-                ts = time.strftime("%H:%M:%S", time.gmtime(c["start"]))
-                f.write(f"[{ts}] JP: {c['ja']}\n")
-                f.write(f"[{ts}] ZH: {c.get('zh', '')}\n\n")
-        print(f"逐字稿將儲存於：{cue_log_path}")
-    else:
-        # 逐字稿、完整錄音共用同一個時間戳，事後才找得到「這份錄音對應哪份逐字稿」
-        raw_audio_path = TRANSCRIPT_DIR / f"transcript_{date_str}_audio.wav"
-        audio_capture = AudioCapture(
-            utterance_queue, audio_ring=audio_ring, device=input_device,
-            record_path=raw_audio_path, pause_state=pause_state,
-        )
-        worker = Worker(
-            utterance_queue, caption_queue, transcript_queue, episode_title,
-            date_str=date_str, pause_state=pause_state, translator=translator,
-        )
+    # 逐字稿、完整錄音共用同一個時間戳，事後才找得到「這份錄音對應哪份逐字稿」
+    raw_audio_path = TRANSCRIPT_DIR / f"transcript_{date_str}_audio.wav"
+    audio_capture = AudioCapture(
+        utterance_queue, audio_ring=audio_ring, device=input_device,
+        record_path=raw_audio_path, pause_state=pause_state,
+    )
+    worker = Worker(
+        utterance_queue, caption_queue, transcript_queue, episode_title,
+        date_str=date_str, pause_state=pause_state, translator=translator,
+    )
 
     # 延遲聲音一定要從「不是被擷取來源」的裝置播出來，不然會變成回音疊加的無限循環
     audio_player = DelayedAudioPlayer(audio_ring, device=output_device, pause_state=pause_state)
@@ -2142,8 +2058,7 @@ def main():
     screen_capture.start()
     audio_capture.start()
     audio_player.start()
-    if worker is not None:
-        worker.start()
+    worker.start()
 
     root = tk.Tk()
     root.title(f"即時中日對照字幕 - {episode_title}" if episode_title else "即時中日對照字幕")
@@ -2169,13 +2084,9 @@ def main():
 
     # PlayerWindow 會先把控制按鈕列 pack 進 root 最上方，接著 paned 才 pack 進來
     # 填滿剩下的空間，上下順序才會對（按鈕列要固定在最頂端，不會被分隔線蓋住）
-    cue_playback = (
-        {"cues": cue_data["cues"], "transcript_queue": transcript_queue} if cue_data is not None else None
-    )
     PlayerWindow(
         root, left_frame, frame_buffer, caption_queue, episode_title,
         pause_state=pause_state, screen_capture=screen_capture, audio_capture=audio_capture,
-        cue_playback=cue_playback,
     )
     paned.pack(fill="both", expand=True)
 
@@ -2200,16 +2111,14 @@ def main():
             else:
                 print(f"沒能記住 {source_process_name} 原本的輸出裝置，可能需要自己在音量混音器裡切回來。")
 
-        if worker is not None:
-            worker.join(timeout=5)  # 等背景執行緒真的寫完檔案，再去讀來整理
+        worker.join(timeout=5)  # 等背景執行緒真的寫完檔案，再去讀來整理
         # 完整錄音的 WAV 檔要等 AudioCapture 執行緒真的跑完、把檔案關閉寫入磁碟，
         # 才能安全地拿去重新辨識——不然可能讀到還沒寫完、不完整的檔案
         audio_capture.join(timeout=5)
         print("已停止擷取，逐字稿已存檔。")
 
-        final_log_path = worker.log_path if worker is not None else cue_log_path
         try:
-            polished_path = polish_transcript(final_log_path) if final_log_path else None
+            polished_path = polish_transcript(worker.log_path) if worker.log_path else None
         except Exception as e:
             polished_path = None
             print(f"整理逐字稿時發生錯誤（原始逐字稿不受影響）：{e}")
@@ -2219,22 +2128,19 @@ def main():
         else:
             print("這次沒有擷取到語句，不產生整理版逐字稿。")
 
-        if worker is not None:
-            # 讀取預先轉錄字幕檔模式已經有完整準確的逐字稿了，不需要再事後
-            # 重新辨識一次
-            if not raw_audio_path.exists():
-                print("這次沒有按下「開始錄製」，沒有完整錄音可以拿去重新整理。")
-            else:
-                try:
-                    notebooklm_style_path = rebuild_transcript_from_full_audio(
-                        raw_audio_path, worker.asr, worker.translator, worker.glossary, episode_title
-                    )
-                except Exception as e:
-                    notebooklm_style_path = None
-                    print(f"用完整錄音重新整理逐字稿時發生錯誤（不影響前面已經產生的逐字稿）：{e}")
+        if not raw_audio_path.exists():
+            print("這次沒有按下「開始錄製」，沒有完整錄音可以拿去重新整理。")
+        else:
+            try:
+                notebooklm_style_path = rebuild_transcript_from_full_audio(
+                    raw_audio_path, worker.asr, worker.translator, worker.glossary, episode_title
+                )
+            except Exception as e:
+                notebooklm_style_path = None
+                print(f"用完整錄音重新整理逐字稿時發生錯誤（不影響前面已經產生的逐字稿）：{e}")
 
-                if notebooklm_style_path:
-                    print(f"已產生用完整錄音重新辨識、準確度更好的逐字稿：{notebooklm_style_path}")
+            if notebooklm_style_path:
+                print(f"已產生用完整錄音重新辨識、準確度更好的逐字稿：{notebooklm_style_path}")
 
 
 if __name__ == "__main__":

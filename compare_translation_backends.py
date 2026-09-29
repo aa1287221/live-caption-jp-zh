@@ -6,15 +6,14 @@ compare_translation_backends.py
 用法：
     python compare_translation_backends.py 樣本.txt
     python compare_translation_backends.py transcripts/transcript_20260926_210000.txt --judge
-    python compare_translation_backends.py 樣本.txt --mode offline --out 報告.md
+    python compare_translation_backends.py 樣本.txt --out 報告.md
     python compare_translation_backends.py 樣本.txt --backends local     （只測本機模型，不需要金鑰）
 
 樣本檔：一行一句日文（空白行、# 開頭的行會略過）；也可以直接丟即時字幕存下來的
 transcripts/transcript_*.txt，會自動取出裡面的 JP 句子。
 
-兩個引擎用的是跟主程式完全相同的 Translator 與提示詞：
-    --mode live     逐句、帶前一句上下文（即時字幕的路徑，預設）
-    --mode offline  編號批次（transcribe_audio_file.py 預先轉錄的路徑）
+兩個引擎用的是跟主程式完全相同的 Translator 與提示詞：逐句、帶前一句上下文
+（跟即時字幕的路徑一樣）。
 
 報告內容：每個引擎的失敗/問題率（空白、照抄提示、沒翻成中文、過長）、術語命中率、
 延遲，兩邊譯文的 chrF 相似度；加 --judge 會請 Gemini 盲評每一句（A/B 隨機排序），
@@ -145,24 +144,6 @@ def run_live(name, translator, samples, glossary, *, pace_seconds=0.0, retry_emp
 	return run
 
 
-def run_offline(name, translator, samples, glossary, offline_module=None, clock=time.perf_counter) -> BackendRun:
-	"""Translate like transcribe_audio_file.py: numbered batches with the same prompts."""
-	if offline_module is None:
-		import transcribe_audio_file as offline_module
-	cues = [{"start": float(index), "end": index + 0.5, "ja": sentence} for index, sentence in enumerate(samples)]
-	system_prompt = offline_module._OFFLINE_SYSTEM_PROMPT
-	hint = offline_module.glossary_hint(glossary) if glossary else ""
-	if hint:
-		system_prompt += "\n" + hint
-	started = clock()
-	if translator.backend == offline_module.TRANSLATION_BACKEND_LOCAL:
-		offline_module._translate_cues_local(translator, cues, glossary, system_prompt)
-	else:
-		offline_module._translate_cues_gemini(translator, cues, system_prompt)
-	per_line = (clock() - started) / max(1, len(samples))
-	return BackendRun(name, [cue.get("zh", "") for cue in cues], [per_line] * len(samples))
-
-
 def summarize(run: BackendRun, samples: list[str], glossary: dict | None) -> dict:
 	problems = Counter()
 	glossary_total = glossary_hits = 0
@@ -260,12 +241,12 @@ def _cell(text: str) -> str:
 	return (text or "（空白）").replace("|", "｜").replace("\n", " ")
 
 
-def render_report(samples, runs, summaries, verdicts, judged, gate, mode) -> str:
+def render_report(samples, runs, summaries, verdicts, judged, gate) -> str:
 	lines = [
 		"# 翻譯引擎比較報告",
 		"",
 		f"- 產生時間：{time.strftime('%Y-%m-%d %H:%M:%S')}",
-		f"- 模式：{'即時字幕（逐句 + 前一句上下文）' if mode == 'live' else '預先轉錄（編號批次）'}",
+		"- 模式：即時字幕（逐句 + 前一句上下文）",
 		f"- 樣本數：{len(samples)}",
 		"",
 		"## 摘要",
@@ -310,10 +291,9 @@ def _default_glossary():
 	return load_glossary()
 
 
-def main(argv=None, *, translator_factory=None, glossary_loader=None, offline_module=None, sleep=time.sleep) -> int:
+def main(argv=None, *, translator_factory=None, glossary_loader=None, sleep=time.sleep) -> int:
 	parser = argparse.ArgumentParser(description="比較 Gemini 與本機語言模型的翻譯結果")
 	parser.add_argument("samples", help="日文樣本檔（一行一句，或 transcripts/transcript_*.txt）")
-	parser.add_argument("--mode", choices=("live", "offline"), default="live")
 	parser.add_argument("--backends", default="gemini,local", help="要比較的引擎，逗號分隔（預設 gemini,local）")
 	parser.add_argument("--glossary", help="術語表 JSON（預設讀 glossary.json）")
 	parser.add_argument("--limit", type=int, default=None, help="只取前 N 句")
@@ -348,13 +328,10 @@ def main(argv=None, *, translator_factory=None, glossary_loader=None, offline_mo
 
 	runs, translators = {}, {}
 	for name in backends:
-		print(f"=== {name}：{len(samples)} 句（{args.mode}）===")
+		print(f"=== {name}：{len(samples)} 句 ===")
 		translators[name] = translator_factory(name)
 		pace = args.gemini_interval if name == "gemini" else 0.0
-		if args.mode == "live":
-			runs[name] = run_live(name, translators[name], samples, glossary, pace_seconds=pace, retry_empty=2 if name == "gemini" else 0, sleep=sleep)
-		else:
-			runs[name] = run_offline(name, translators[name], samples, glossary, offline_module=offline_module)
+		runs[name] = run_live(name, translators[name], samples, glossary, pace_seconds=pace, retry_empty=2 if name == "gemini" else 0, sleep=sleep)
 
 	summaries = {name: summarize(run, samples, glossary) for name, run in runs.items()}
 	verdicts, judged = [], None
@@ -372,13 +349,13 @@ def main(argv=None, *, translator_factory=None, glossary_loader=None, offline_mo
 			max_problem_gap=args.max_problem_gap, max_glossary_gap=args.max_glossary_gap, min_judge_score=args.min_judge_score,
 		)
 
-	report = render_report(samples, runs, summaries, verdicts, judged, gate, args.mode)
+	report = render_report(samples, runs, summaries, verdicts, judged, gate)
 	out_path = Path(args.out) if args.out else samples_path.with_name(samples_path.stem + "_backend_report.md")
 	out_path.write_text(report, encoding="utf-8")
 	print(f"報告：{out_path}")
 	if args.json_path:
 		payload = {
-			"mode": args.mode, "samples": samples, "outputs": {name: run.outputs for name, run in runs.items()},
+			"mode": "live", "samples": samples, "outputs": {name: run.outputs for name, run in runs.items()},
 			"summaries": summaries, "verdicts": verdicts, "judge": judged,
 			"gate": None if gate is None else {"passed": gate[0], "checks": gate[1]},
 		}
