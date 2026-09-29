@@ -801,7 +801,7 @@ class AudioRingBuffer:
 class ScreenCapture:
     """擷取指定視窗的畫面，存進 FrameBuffer 供延遲播放。
 
-    實際擷取邏輯（PrintWindow + PW_RENDERFULLCONTENT）跑在一個獨立的行程
+    實際擷取邏輯（預設 Windows Graphics Capture，抓到黑畫面時改用 PrintWindow）跑在一個獨立的行程
     （process）裡，定義在 screen_capture_worker.py——不是像之前那樣用同一個
     行程裡的執行緒。原因：Python 同一行程內不管開幾條執行緒，同一時間真正在
     跑的 Python 程式碼還是只有一個（GIL 限制），擷取畫面這種吃 CPU 的工作
@@ -1638,6 +1638,9 @@ class PlayerWindow:
         self._pending_caption = []  # [(release_at, ja_lines, zh)]
         self._next_caption_switch = 0.0  # 目前這句字幕最早可以幾點被換掉
         self._photo = None  # 保留參考，不然 Tkinter 的圖片會被垃圾回收
+        self._photo_size = None   # 目前 _photo 的 (寬, 高)；尺寸沒變就直接 paste 更新
+        self._image_item = None   # 畫布上那張圖的 id，重複使用、不每格刪掉重建
+        self._last_frame = None   # 上一格畫過的畫面，同一格就不用重畫
 
         # 操作按鈕列：暫停/繼續、切換擷取視窗、開始/停止錄製完整音訊——橫跨整個
         # 視窗頂端（不是只 pack 進 container，不然會只蓋住左半邊，右邊逐字稿看不到）
@@ -1744,6 +1747,7 @@ class PlayerWindow:
         print(f"已切換擷取視窗：{chosen.title}")
 
     def _poll_video(self):
+        started = time.perf_counter()
         is_paused = self.pause_state is not None and self.pause_state.is_paused()
         if is_paused:
             # 暫停中：畫面就停在最後一格不動，只在上面疊一個「已暫停」的字，
@@ -1768,19 +1772,38 @@ class PlayerWindow:
             fh, fw = frame.shape[:2]  # frame 是 numpy 陣列 (H, W, 3)
             scale = min(cw / fw, ch / fh)
             new_w, new_h = max(1, int(fw * scale)), max(1, int(fh * scale))
-            # 用 cv2 縮放，比 PIL 的 resize 快很多，減少畫面更新這一步造成的掉幀
-            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            self._photo = ImageTk.PhotoImage(Image.fromarray(resized))
-            self.canvas.delete("all")
-            self.canvas.create_image(cw // 2, ch // 2, image=self._photo, anchor="center")
+            size_changed = (new_w, new_h) != self._photo_size
+            if frame is not self._last_frame or size_changed:
+                # 用 cv2 縮放，比 PIL 的 resize 快很多，減少畫面更新這一步造成的掉幀
+                resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                if size_changed or self._image_item is None:
+                    # 視窗大小變了才重建圖片；平常每一格都只 paste 進同一張圖，
+                    # 省掉每格「新建 PhotoImage + 刪掉重畫畫布」的成本（實測約快一倍）
+                    self.canvas.delete("all")
+                    self._photo = ImageTk.PhotoImage(Image.fromarray(resized))
+                    self._image_item = self.canvas.create_image(
+                        cw // 2, ch // 2, image=self._photo, anchor="center"
+                    )
+                    self._photo_size = (new_w, new_h)
+                else:
+                    self.canvas.delete("pause_overlay")
+                    self.canvas.coords(self._image_item, cw // 2, ch // 2)
+                    self._photo.paste(Image.fromarray(resized))
+                self._last_frame = frame
         elif cw > 10 and ch > 10:
             self.canvas.delete("all")
+            self._image_item = None
+            self._photo_size = None
+            self._last_frame = None
             self.canvas.create_text(
                 cw // 2, ch // 2, text="緩衝中...", fill="white",
                 font=("Microsoft JhengHei", 16),
             )
 
-        self.root.after(1000 // CAPTURE_TARGET_FPS, self._poll_video)
+        # 下一格的等待時間要扣掉這一格已經花掉的時間，不然「畫圖時間 + 固定
+        # 等待」疊起來，實際更新率會掉到目標的一半左右
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self.root.after(max(1, int(1000 / CAPTURE_TARGET_FPS - elapsed_ms)), self._poll_video)
 
     def _poll_captions(self):
         try:
@@ -1890,7 +1913,14 @@ def main():
     import pygetwindow as gw
     import win32process
 
-    last =load_last_settings(SETTINGS_PATH)
+    # Windows 預設計時器精度約 15.6ms，root.after(10) 實際會等 15~31ms，播放畫面
+    # 一秒最多只能更新約 43 次；調成 1ms 才跟得上 60fps。程式結束時會自動還原
+    try:
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
+
+    last = load_last_settings(SETTINGS_PATH)
 
     candidates = [
         w for w in gw.getAllWindows()
