@@ -114,7 +114,7 @@ from PIL import Image, ImageTk
 
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
-from local_translation import LocalTranslationEngine
+from local_translation import LocalTranslationEngine, translation_problem
 from llama_server import LlamaServerError, ensure_llama_server
 
 # The Gemini SDK is imported only when the Gemini backend is chosen, so local-model
@@ -1489,7 +1489,14 @@ class Translator:
             return self.local.translate_live(
                 system_prompt, user_prompt, current_ja, glossary, fallback_user_prompt=f"請翻譯：\n{current_ja}"
             )
-        return self._chat(system_prompt, user_prompt)
+        result = self._chat(system_prompt, user_prompt)
+        if result and translation_problem(result, current_ja, glossary) == "untranslated":
+            # Gemini 偶爾會把日文原文照抄回來（中文字幕變成日文）；不帶前一句、
+            # 用最單純的提示再翻一次，還是沒翻成中文的話就照原本的結果顯示
+            retry = self._chat(system_prompt, f"請把這一句翻成繁體中文：\n{current_ja}")
+            if retry and translation_problem(retry, current_ja, glossary) is None:
+                return retry
+        return result
 
 
 class Worker(threading.Thread):
