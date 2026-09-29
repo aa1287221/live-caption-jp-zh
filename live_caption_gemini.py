@@ -230,6 +230,8 @@ SOUND_VOLUME_VIEW_PATH = Path(__file__).parent / "tools" / "SoundVolumeView.exe"
 # （常客來賓名字、節目裡的哏、常出現的專有名詞都可以加進去）
 _DEFAULT_GLOSSARY = {
     "羊宮妃那": "羊宮妃那",
+    "ゆみやひな": "羊宮妃那",
+    "陽宮ひな": "羊宮妃那",
     "羊宮妃那のHOOOOPE!": "羊宮妃那のHOOOOPE!",
     "羊宮妃那のこもれびじかん": "羊宮妃那のこもれびじかん",
     "HOOOOPE": "HOOOOPE",
@@ -241,13 +243,12 @@ def load_glossary() -> dict:
     """讀取專有名詞對照表（glossary.json）。
 
     格式：{"日文詞": "希望顯示的中文"}
-    左邊填容易被聽錯/翻錯的專有名詞（人名、節目名、常客來賓名等），
-    右邊填你想要畫面上顯示的樣子；如果不想被翻譯、想直接保留原文，
-    右邊填跟左邊一樣的文字就好（範例都是這樣設定的）。
+    左邊填語音辨識可能寫出來的樣子（包含聽錯的寫法，例如「陽宮ひな」），
+    右邊填正確寫法；正確寫法本身也可以列一行、左右填一樣。
 
-    這份清單會做兩件事：
-      1. 當提示詞餵給 Whisper，讓語音辨識比較容易正確拼出這些詞
-      2. 翻譯前先保護起來，避免被翻譯模型誤譯成不相干的字
+    這份清單只給翻譯模型參考（見 glossary_hint），不再餵給 Whisper：
+    實測當 Whisper 提示詞時，名字雖然比較容易拼對，但會讓它整句漏聽，
+    名單跟當下內容無關時還會憑空冒出名字；聽錯的名字改由翻譯時修正。
     """
     if not GLOSSARY_PATH.exists():
         with open(GLOSSARY_PATH, "w", encoding="utf-8") as f:
@@ -267,20 +268,34 @@ def load_glossary() -> dict:
 
 
 def glossary_hint(glossary: dict) -> str:
-    """把專有名詞對照表變成給 LLM 看的提示詞。
+    """把專有名詞對照表變成給 LLM 看的補充說明。
 
-    用條列式格式（一行一個詞），比全部擠成一句用頓號隔開更容易讓模型每個都
-    注意到，詞多的時候（例如 20 幾個）尤其有差；LLM 不像傳統翻譯模型那樣需要
-    用佔位符「保護」專有名詞，但也不是 100% 保證會遵守，詞單一多還是可能漏。
+    同一個正確寫法的各種聽寫寫法合併成一行，例如
+    「- 羊宮妃那（聽寫可能寫成：ゆみやひな、陽宮ひな）」。
+
+    以前的寫法是「一律完全保留原文，絕對不要翻譯」，口氣太硬，模型偶爾會
+    連整句日文都照抄回來；右邊的正確寫法也沒被用到，聽錯的名字就照錯的翻。
+    實測（45 句盲評）改成溫和說明後，翻譯品質不變或略好，聽錯的名字也會
+    被修正回正確寫法。
     """
     if not glossary:
         return ""
-    terms = sorted({t for t in glossary if t})
-    bullet_list = "\n".join(f"- {t}" for t in terms)
+    variants: dict[str, list[str]] = {}
+    for heard, correct in glossary.items():
+        correct = (correct or heard or "").strip()
+        heard = (heard or "").strip()
+        if not correct:
+            continue
+        names = variants.setdefault(correct, [])
+        if heard and heard != correct and heard not in names:
+            names.append(heard)
+    lines = []
+    for correct in sorted(variants):
+        heard = variants[correct]
+        lines.append(f"- {correct}（聽寫可能寫成：{'、'.join(heard)}）" if heard else f"- {correct}")
     return (
-        "以下是專有名詞對照表（人名、節目名、團名等），這些詞不管出現在句子的哪個"
-        "位置，一律「完全保留原文」，絕對不要翻譯、意譯、或拆解成別的字：\n"
-        f"{bullet_list}"
+        "補充：聽寫稿是語音辨識的結果，人名、節目名常被寫成發音相近的其他字。"
+        "以下是正確寫法，遇到發音相近的寫法時，請照正確寫法翻譯：\n" + "\n".join(lines)
     )
 
 
@@ -509,7 +524,6 @@ def rebuild_transcript_from_full_audio(
         language="ja",
         vad_filter=True,   # 交給 Whisper 內建 VAD 處理整段音訊的斷句，不用自己切
         beam_size=WHISPER_BEAM_SIZE,
-        initial_prompt="、".join(glossary.keys()) if glossary else None,
         no_speech_threshold=0.6,
         log_prob_threshold=-1.0,
     )
@@ -1535,10 +1549,8 @@ class Worker(threading.Thread):
 
         self.prev_ja = ""  # 只看前一句當上下文，用來讓翻譯知道代名詞/省略主詞指的是誰
 
+        # 專有名詞清單只給翻譯模型參考，不當 Whisper 的提示詞（原因見 load_glossary）
         self.glossary = load_glossary()
-        # 把專有名詞清單當提示詞餵給 Whisper，幫助它正確拼出這些字，
-        # 而不是純粹憑發音亂猜（「、」是日文的頓號，模型看得懂這種列舉格式）
-        self.initial_prompt = "、".join(self.glossary.keys()) if self.glossary else None
         if self.glossary:
             print(f"已載入 {len(self.glossary)} 個專有名詞：{'、'.join(self.glossary.keys())}")
 
@@ -1568,7 +1580,6 @@ class Worker(threading.Thread):
                 vad_filter=False,
                 beam_size=WHISPER_BEAM_SIZE,
                 condition_on_previous_text=False,  # 避免長時間播放時的重複幻覺
-                initial_prompt=self.initial_prompt,  # 提示專有名詞正確拼法
                 no_speech_threshold=0.6,   # 這個機率以上就當作沒有真人講話，過濾掉
                 log_prob_threshold=-1.0,   # 平均信心太低的結果（很可能是腦補）也丟掉
             )
