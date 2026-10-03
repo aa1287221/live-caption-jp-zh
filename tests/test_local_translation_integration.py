@@ -462,6 +462,33 @@ class WorkflowWiringTests(TranslationBackendTestCase):
 		translator_class.assert_not_called()
 		self.assertIs(worker.translator, injected)
 
+	def test_worker_keeps_confident_speech_even_with_high_no_speech_prob(self):
+		# large-v3 often gives clear speech over background music a no_speech_prob of 0.6~0.9;
+		# faster-whisper's own rule (no_speech_prob AND low avg_logprob) already filters silence,
+		# so the worker must not drop a segment just because no_speech_prob is high.
+		import time
+		segment = FakeSegment(0, "していく番組です")
+		segment.no_speech_prob = 0.85
+		segment.avg_logprob = -0.16
+		translator = mock.Mock()
+		translator.translate_with_context.return_value = "這是會這樣做下去的節目。"
+		utterances, captions = queue.Queue(), queue.Queue()
+		with mock.patch.object(self.app, "load_glossary", return_value={}), \
+				tempfile.TemporaryDirectory() as temp_dir, \
+				mock.patch.object(self.app, "TRANSCRIPT_DIR", Path(temp_dir)):
+			worker = self.app.Worker(utterances, captions, queue.Queue(), translator=translator)
+			worker.asr = mock.Mock()
+			worker.asr.transcribe.return_value = ([segment], None)
+			worker.start()
+			utterances.put(([0.0] * 16000, time.time()))  # numpy is stubbed here; asr is mocked anyway
+			try:
+				_, ja, zh = captions.get(timeout=5)
+			finally:
+				worker.stop()
+				worker.join(timeout=5)
+		self.assertEqual(ja, "していく番組です")
+		self.assertEqual(zh, "這是會這樣做下去的節目。")
+
 
 
 if __name__ == "__main__":

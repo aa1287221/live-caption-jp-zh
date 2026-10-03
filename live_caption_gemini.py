@@ -49,7 +49,7 @@ live_caption_gemini.py
     python live_caption_gemini.py
 
     一開始會跳出一個視窗清單，選你要擷取的視窗（通常是瀏覽器）。
-    接著問節目名稱、延遲秒數（直接按 Enter 用預設的 6 秒），
+    接著問節目名稱、延遲秒數（直接按 Enter 用預設的 15 秒），
     然後在瀏覽器正常播放影片即可。
 
     畫面會是這樣：延遲播放視窗最上面一排是操作按鈕，下面是延遲播放的畫面、
@@ -199,7 +199,10 @@ MAX_UTTERANCE_SEC = 10
 
 # 畫面+聲音會延遲這麼多秒才播放給你看/聽，翻譯字幕也會延遲相同秒數才顯示，
 # 兩者對在一起，達到「精準對上這個人開口瞬間」的效果。啟動時可以覆蓋這個值。
-DISPLAY_DELAY_SEC = 6.0
+# 字幕的顯示時間是從「這句話開口那一刻」算起，所以延遲至少要蓋過：句子長度
+# （最長 MAX_UTTERANCE_SEC=10 秒）+ 停頓確認 0.7 秒 + 辨識 + 翻譯。實測 95% 的
+# 句子需要約 13.4 秒（large-v3），預設 15 秒留一點餘裕給翻譯偶爾變慢。
+DISPLAY_DELAY_SEC = 15.0
 
 # 結束播放後，整理逐字稿時用：停頓超過這麼久，就在整理稿裡另起一個段落標題
 PARAGRAPH_GAP_SEC = 8
@@ -1621,16 +1624,14 @@ class Worker(threading.Thread):
                 vad_filter=False,
                 beam_size=WHISPER_BEAM_SIZE,
                 condition_on_previous_text=False,  # 避免長時間播放時的重複幻覺
-                no_speech_threshold=0.6,   # 這個機率以上就當作沒有真人講話，過濾掉
-                log_prob_threshold=-1.0,   # 平均信心太低的結果（很可能是腦補）也丟掉
+                # Whisper 原生規則：「沒人說話機率 > 0.6」而且「平均信心 < -1.0」才當成
+                # 沒人講話丟掉。不要再自己加「no_speech_prob > 0.6 就整句丟」——large-v3
+                # 遇到背景音樂常給真正的人聲 0.6~0.9 的 no_speech_prob，實測 74 句裡有
+                # 13 句清楚的人聲被這樣誤丟（信心都在 -0.5 以上，turbo 也辨識出一樣的內容）
+                no_speech_threshold=0.6,
+                log_prob_threshold=-1.0,
             )
             segments = list(segments)
-            # Whisper 遇到雜音/靜音這種沒有真人講話的片段，偶爾會「腦補」出訓練資料裡
-            # 常見的制式片語（最典型的就是日文影片常見的結尾語「ご視聴ありがとう
-            # ございました」），不是真的有人講這句話。no_speech_prob 太高的片段代表
-            # 模型自己都覺得這裡可能沒人在講話，直接濾掉
-            if any(getattr(seg, "no_speech_prob", 0.0) > 0.6 for seg in segments):
-                continue
             ja_text = "".join(seg.text for seg in segments).strip()
             if not ja_text or ja_text in _HALLUCINATION_DENYLIST:
                 continue
