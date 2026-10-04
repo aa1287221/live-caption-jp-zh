@@ -103,6 +103,8 @@ pip install -r requirements.txt
 
 第一次執行時會自動下載 Whisper 語音辨識模型（約 1.5～3 GB）和 Silero VAD。
 
+之後用 `git pull` 更新程式時，也要再執行一次 `pip install -r requirements.txt`：新版本可能會用到新的套件，或需要較新版本的套件。
+
 ### 3. 準備翻譯引擎
 
 **Gemini API（預設）**：到 https://aistudio.google.com/apikey 申請金鑰，擇一提供：
@@ -232,7 +234,8 @@ llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ng
   正常關閉時程式會自動切回，這通常是程式被強制結束才會發生
 - **畫面變黑或停住**：瀏覽器被縮小了，或是被擋住時停止繪製，見「使用時要注意」。
   程式會偵測 Windows Graphics Capture 是否一直抓到黑畫面，是的話會自動改用舊的擷取方式
-- **畫面卡卡的**：確認用的是最新版（Windows Graphics Capture 擷取）；影片本身只有 30 fps 的話，擷取出來也只有 30 fps
+- **畫面卡卡的**：確認用的是最新版（Windows Graphics Capture 擷取）；影片本身只有 30 fps 的話，擷取出來也只有 30 fps。
+  終端機顯示「找不到 windows-capture 套件」或「windows-capture 版本太舊」的話，關掉程式後執行 `pip install -r requirements.txt` 補裝或更新，再重新啟動程式
 - **中文字幕那行出現日文**：Gemini 偶爾會照抄原文，程式會自動重翻一次；重翻還是日文就只能跳過那句
 - **④ 沒有 CABLE 可以選**：VB-Audio Virtual Cable 還沒裝，或裝完還沒重開機
 - **`cublas64_12.dll is not found`**：用的是 cu130 版 torch，照「安裝」第 1 步最後那段補上 CUDA 12 的 cuBLAS

@@ -140,11 +140,35 @@ def _run_wgc(hwnd, writer, hwnd_shared, stop_event, pause_event) -> str:
     回傳 "stop"（要結束）、"switch"（視窗換了，重新開始）、"fallback"（WGC
     一直拿到黑畫面，但 PrintWindow 抓得到內容，改用 PrintWindow）、"error"。
     """
-    from windows_capture import WindowsCapture
-
     state = {"black_since": None, "fallback": False}
 
-    capture = WindowsCapture(cursor_capture=False, draw_border=False, window_hwnd=hwnd)
+    # 用 git pull 更新卻沒重跑 pip install 的人會缺這個套件或停在舊版，
+    # 這裡失敗要回 "error" 讓這個視窗改用 PrintWindow，不能讓整個擷取行程掛掉
+    try:
+        from windows_capture import WindowsCapture
+
+        capture = WindowsCapture(cursor_capture=False, draw_border=False, window_hwnd=hwnd)
+    except ModuleNotFoundError as e:
+        if e.name == "windows_capture":
+            print(
+                "[擷取行程] 找不到 windows-capture 套件，先改用 PrintWindow 擷取（fps 會比較低）。"
+                "請執行 pip install -r requirements.txt 安裝，裝好後重新啟動程式。"
+            )
+        else:
+            # 安裝壞掉（套件在、少了裡面的模組）時 pip install -r 會當成已經裝好，安裝提示沒用
+            print(f"[擷取行程] 無法使用 Windows Graphics Capture，改用 PrintWindow：{e}")
+        return "error"
+    except TypeError:
+        # 1.x 版沒有 window_hwnd 參數。這時舊版的 .pyd 已經載入，Windows 會鎖住它，
+        # 程式還開著就執行 pip install -U 可能會失敗，所以要先關掉程式
+        print(
+            "[擷取行程] windows-capture 版本太舊（需要 2.0.0 以上），先改用 PrintWindow 擷取"
+            "（fps 會比較低）。請先關掉程式，執行 pip install -U windows-capture 更新，再重新啟動程式。"
+        )
+        return "error"
+    except Exception as e:
+        print(f"[擷取行程] 無法使用 Windows Graphics Capture，改用 PrintWindow：{e}")
+        return "error"
 
     @capture.event
     def on_frame_arrived(frame, control):

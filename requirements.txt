@@ -8,7 +8,7 @@ numpy
 
 # 內建擷取引擎用：選視窗、抓畫面、延遲播放、自動調整來源音量
 # 畫面擷取預設用 Windows Graphics Capture（windows-capture），抓到黑畫面時自動改用 PrintWindow
-windows-capture
+windows-capture>=2.0.0
 sounddevice
 pycaw
 pygetwindow
