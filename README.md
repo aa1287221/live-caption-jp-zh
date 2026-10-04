@@ -121,10 +121,10 @@ pip install -r requirements.txt
 
 1. **VB-Audio Virtual Cable**（免費）：從 https://vb-audio.com/Cable/ 下載 `VBCABLE_Driver_Pack`，
    解壓後**對 `VBCABLE_Setup_x64.exe` 按右鍵 →「以系統管理員身分執行」**→「Install Driver」，裝完重開機。
-2. **NirSoft SoundVolumeView**（免安裝）：從 https://www.nirsoft.net/utils/sound_volume_view.html 下載 64 位元版，
+2. **NirSoft SoundVolumeView**（免安裝）：從 https://www.nirsoft.net/utils/sound_volume_view.html 下載 64 位元版（2.43 以上），
    把 `SoundVolumeView.exe` 放到 `tools\SoundVolumeView.exe`。
-   程式靠它在開始時把瀏覽器的輸出切到 `CABLE Input`、結束時切回原本的裝置
-   （開始時瀏覽器沒在播放聲音、查不到原本裝置的話，就切回系統預設的播放裝置）。
+   程式靠它在開始時把瀏覽器的輸出切到 `CABLE Input`、結束時切回瀏覽器原本在播放的裝置
+   （開始時瀏覽器沒在播放聲音，或本來就在系統預設的裝置上播放的話，就讓它改回跟著系統預設的播放裝置）。
    `tools\` 不會上傳到 GitHub，換電腦或換資料夾時要記得一起複製。
 
 ### 5. 打包成 exe、建立桌面捷徑（選用）
@@ -228,8 +228,8 @@ llama-server -m 你的模型.gguf --host 127.0.0.1 --port 8766 -c 8192 -np 1 -ng
 - **用 CABLE 擷取但字幕都不出來（全程靜音）**：切換瀏覽器的輸出裝置後，只有「新開始播放」的聲音會改走 CABLE。
   到瀏覽器重新整理影片頁面（或暫停再播放）就好。還是不行的話，確認 `tools\SoundVolumeView.exe` 存在，
   或到 Windows 音量混音器手動把瀏覽器輸出設成 `CABLE Input`
-- **關掉程式後瀏覽器沒有聲音**：到 Windows 音量混音器把瀏覽器的輸出改回你的耳機或喇叭。
-  正常關閉時程式會自動切回，這通常是程式被強制結束才會發生
+- **關掉程式後瀏覽器沒有聲音**：到 Windows 音量混音器把瀏覽器的輸出改回「預設」或你的耳機、喇叭。
+  正常關閉時程式會自動切回原本在播放的裝置，或讓它改回跟著系統預設的播放裝置；這通常是程式被強制結束才會發生
 - **畫面變黑或停住**：瀏覽器被縮小了，或是被擋住時停止繪製，見「使用時要注意」。
   程式會偵測 Windows Graphics Capture 是否一直抓到黑畫面，是的話會自動改用舊的擷取方式
 - **畫面卡卡的**：確認用的是最新版（Windows Graphics Capture 擷取）；影片本身只有 30 fps 的話，擷取出來也只有 30 fps

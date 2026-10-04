@@ -87,6 +87,7 @@ live_caption_gemini.py
 """
 
 import os
+import ntpath
 import sys
 import re
 import json
@@ -228,6 +229,8 @@ GLOSSARY_PATH = Path(__file__).parent / "glossary.json"
 
 # 用來自動把瀏覽器輸出裝置切到虛擬音訊線、結束時再切回去的小工具（NirSoft SoundVolumeView）
 SOUND_VOLUME_VIEW_PATH = Path(__file__).parent / "tools" / "SoundVolumeView.exe"
+# SoundVolumeView 的特殊裝置名稱：用它切換等於讓程式改回跟著系統預設的播放裝置
+DEFAULT_RENDER_DEVICE = "DefaultRenderDevice"
 
 # 第一次執行會照這份預設值建立 glossary.json，之後你可以自己編輯增減
 # （常客來賓名字、節目裡的哏、常出現的專有名詞都可以加進去）
@@ -680,8 +683,9 @@ def get_app_output_device(process_name: str, rows: list[dict] | None = None) -> 
 
     回傳 SoundVolumeView 的「Command-Line Friendly ID」（例如
     「Realtek(R) Audio／Device／Realtek HD Audio 2nd output／Render」，實際用反斜線分隔），可以直接拿去切回去；
-    同一張音效卡有好幾個輸出時也不會搞混。那個程式現在沒在播放聲音（沒有工作階段）、
-    或 SoundVolumeView 不存在時回傳 None。
+    同一張音效卡有好幾個輸出時也不會搞混。只看 Device State 是 Active 的工作階段；
+    那個程式現在沒在播放聲音（沒有 Active 的工作階段）、SoundVolumeView 太舊（2.43 以前
+    只有裝置那幾列會填 Device State，程式工作階段那幾列是空的），或 SoundVolumeView 不存在時回傳 None。
     """
     rows = _sound_volume_view_rows() if rows is None else rows
     target = process_name.lower()
@@ -690,7 +694,10 @@ def get_app_output_device(process_name: str, rows: list[dict] | None = None) -> 
         # 要用 Process Path 比對
         if row.get("Type") != "Application" or row.get("Direction") != "Render":
             continue
-        if Path(row.get("Process Path", "")).name.lower() != target:
+        # Inactive／Expired 的工作階段現在沒在播放，可能是以前用過的裝置留下來的，分不出哪個是現在的輸出裝置
+        if row.get("Device State") != "Active":
+            continue
+        if ntpath.basename(row.get("Process Path", "")).lower() != target:
             continue
         endpoint = _endpoint_id(row.get("Item ID", ""))
         for device in rows:
@@ -733,6 +740,35 @@ def set_app_output_device(process_name: str, device_name: str) -> bool:
     except Exception as e:
         print(f"切換 {process_name} 輸出裝置失敗：{e}")
         return False
+
+
+def remember_app_output_device(process_name: str, cable_device: str, rows: list[dict]) -> str | None:
+    """切到虛擬音訊線之前記下結束時要切回的裝置；None 代表結束時改回跟著系統預設的播放裝置"""
+    device = get_app_output_device(process_name, rows)
+    # 上次程式沒正常結束、瀏覽器還停在 CABLE 的話，也當成查不到，不要切回 CABLE
+    if device == cable_device:
+        return None
+    # 找不到同名裝置時 cable_device 只是「CABLE Input」這個字串，瀏覽器也可能停在別條 CABLE 上，直接比對會漏掉
+    if device and "CABLE" in device.upper():
+        return None
+    # 在系統預設裝置上播放多半只是跟著預設，結束時改回跟著預設，比把它固定在這個裝置好
+    if device == get_default_output_device(rows):
+        return None
+    return device
+
+
+def restore_app_output_device(process_name: str, original_device: str | None):
+    """結束時把程式的輸出裝置切回原本的裝置；original_device 是 None 就改回跟著系統預設的播放裝置。
+    SoundVolumeView 不存在時沒辦法切換，改成提醒使用者自己切回來。"""
+    if not SOUND_VOLUME_VIEW_PATH.exists():
+        print(f"請自己在 Windows 音量混音器裡把 {process_name} 的輸出裝置從「CABLE Input」改回原本的設定。")
+        return
+    if not set_app_output_device(process_name, original_device or DEFAULT_RENDER_DEVICE):
+        print(f"沒辦法自動切回 {process_name} 的輸出裝置，可能需要自己在音量混音器裡切回來。")
+    elif original_device:
+        print(f"已把 {process_name} 的輸出裝置切回「{original_device}」。")
+    else:
+        print(f"已把 {process_name} 的輸出裝置改回跟著系統預設的播放裝置。")
 
 
 class PauseState:
@@ -2100,11 +2136,8 @@ def main():
         if source_process_name and SOUND_VOLUME_VIEW_PATH.exists():
             sound_rows = _sound_volume_view_rows()
             cable_device = find_output_device("CABLE Input", sound_rows) or "CABLE Input"
-            # 瀏覽器現在沒在播放聲音的話查不到（None），結束時就改切回系統預設裝置；
-            # 上次程式沒正常結束、瀏覽器還停在 CABLE 的話，也當成查不到，不要切回 CABLE
-            original_output_device = get_app_output_device(source_process_name, sound_rows)
-            if original_output_device == cable_device:
-                original_output_device = None
+            # 瀏覽器現在沒在播放聲音的話查不到（None），結束時就改回跟著系統預設的播放裝置
+            original_output_device = remember_app_output_device(source_process_name, cable_device, sound_rows)
             if set_app_output_device(source_process_name, cable_device):
                 print(f"已自動把 {source_process_name} 的輸出裝置切到虛擬音訊線。")
                 print("提醒：切換裝置指令不會影響「已經在播放」的分頁——")
@@ -2199,14 +2232,9 @@ def main():
         if worker is not None:
             worker.stop()
 
-        if source_process_name and SOUND_VOLUME_VIEW_PATH.exists():
-            # 結束時把來源程式的輸出裝置切回原本的；開始時查不到原本的裝置（瀏覽器
-            # 那時沒在播放），就切回系統預設的播放裝置，不留下要自己手動改回去的麻煩
-            restore_device = original_output_device or get_default_output_device()
-            if restore_device and set_app_output_device(source_process_name, restore_device):
-                print(f"已把 {source_process_name} 的輸出裝置切回「{restore_device}」。")
-            else:
-                print(f"沒辦法自動切回 {source_process_name} 的輸出裝置，可能需要自己在音量混音器裡切回來。")
+        if source_process_name:
+            # 結束時把來源程式的輸出裝置切回原本的，不留下要自己手動改回去的麻煩
+            restore_app_output_device(source_process_name, original_output_device)
 
         worker.join(timeout=5)  # 等背景執行緒真的寫完檔案，再去讀來整理
         # 完整錄音的 WAV 檔要等 AudioCapture 執行緒真的跑完、把檔案關閉寫入磁碟，

@@ -432,8 +432,28 @@ SOUND_ROWS = [
 	 "Item ID": "{0.0.0.00000000}.{ccc}", "Command-Line Friendly ID": "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render"},
 	# 程式工作階段那一列的 Name 是顯示名稱（Brave），不是 brave.exe
 	{"Name": "Brave", "Type": "Application", "Direction": "Render", "Default": "",
+	 "Device State": "Active",  # SoundVolumeView 2.43 起，程式工作階段那幾列也會填這個欄位
 	 "Item ID": "{0.0.0.00000000}.{bbb}|\\Device\\HarddiskVolume3\\Program Files\\Brave\\brave.exe%b{0}|1%b42",
 	 "Process Path": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"},
+]
+
+# 程式以前用過的裝置上會留著 Inactive／Expired 的工作階段；裝置沿用 SOUND_ROWS 前三列（喇叭是系統預設）
+SESSION_ROWS = SOUND_ROWS[:3] + [
+	{"Name": "Firefox", "Type": "Application", "Direction": "Render", "Default": "", "Device State": "Inactive",
+	 "Item ID": "{0.0.0.00000000}.{bbb}|\\Device\\HarddiskVolume3\\Program Files\\Mozilla Firefox\\firefox.exe%b{0}|1%b7",
+	 "Process Path": "C:\\Program Files\\Mozilla Firefox\\firefox.exe"},
+	{"Name": "Firefox", "Type": "Application", "Direction": "Render", "Default": "", "Device State": "Active",
+	 "Item ID": "{0.0.0.00000000}.{aaa}|\\Device\\HarddiskVolume3\\Program Files\\Mozilla Firefox\\firefox.exe%b{0}|1%b7",
+	 "Process Path": "C:\\Program Files\\Mozilla Firefox\\firefox.exe"},
+	{"Name": "Microsoft Edge", "Type": "Application", "Direction": "Render", "Default": "", "Device State": "Inactive",
+	 "Item ID": "{0.0.0.00000000}.{aaa}|\\Device\\HarddiskVolume3\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe%b{0}|1%b9",
+	 "Process Path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"},
+	{"Name": "Microsoft Edge", "Type": "Application", "Direction": "Render", "Default": "", "Device State": "Expired",
+	 "Item ID": "{0.0.0.00000000}.{bbb}|\\Device\\HarddiskVolume3\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe%b{0}|1%b9",
+	 "Process Path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"},
+	{"Name": "Google Chrome", "Type": "Application", "Direction": "Render", "Default": "", "Device State": "Active",
+	 "Item ID": "{0.0.0.00000000}.{ccc}|\\Device\\HarddiskVolume3\\Program Files\\Google\\Chrome\\Application\\chrome.exe%b{0}|1%b5",
+	 "Process Path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"},
 ]
 
 
@@ -449,6 +469,88 @@ class AudioRoutingTests(TranslationBackendTestCase):
 		self.assertEqual(self.app.get_default_output_device(SOUND_ROWS), "FxSound Audio Enhancer\\Device\\喇叭\\Render")
 		self.assertEqual(self.app.find_output_device("CABLE Input", SOUND_ROWS), "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render")
 		self.assertIsNone(self.app.find_output_device("不存在的裝置", SOUND_ROWS))
+
+	def test_inactive_session_listed_first_is_not_the_current_device(self):
+		self.assertEqual(self.app.get_app_output_device("firefox.exe", SESSION_ROWS),
+			"FxSound Audio Enhancer\\Device\\喇叭\\Render")
+
+	def test_app_with_only_inactive_sessions_returns_none(self):
+		self.assertIsNone(self.app.get_app_output_device("msedge.exe", SESSION_ROWS))
+
+	def test_session_without_device_state_returns_none(self):
+		# SoundVolumeView 2.43 以前，程式工作階段那幾列的 Device State 是空的
+		old_rows = [{**row, "Device State": ""} if row["Type"] == "Application" else row for row in SOUND_ROWS]
+		self.assertIsNone(self.app.get_app_output_device("brave.exe", old_rows))
+
+	def test_remember_skips_a_session_on_the_system_default_device(self):
+		cable = "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render"
+		self.assertIsNone(self.app.remember_app_output_device("firefox.exe", cable, SESSION_ROWS))
+
+	def test_remember_skips_a_session_left_on_cable(self):
+		cable = "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render"
+		self.assertIsNone(self.app.remember_app_output_device("chrome.exe", cable, SESSION_ROWS))
+
+	def test_remember_keeps_a_session_on_another_device(self):
+		cable = "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render"
+		self.assertEqual(self.app.remember_app_output_device("brave.exe", cable, SOUND_ROWS),
+			"Realtek(R) Audio\\Device\\Realtek HD Audio 2nd output\\Render")
+
+	def patch_sound_volume_view(self, exists=True):
+		# 只是讓 exists() 成立的空檔案；用到的測試都把 set_app_output_device 換掉了，不會真的去執行它
+		temp_dir = tempfile.TemporaryDirectory()
+		self.addCleanup(temp_dir.cleanup)
+		path = Path(temp_dir.name) / "SoundVolumeView.exe"
+		if exists:
+			path.write_bytes(b"")
+		patcher = mock.patch.object(self.app, "SOUND_VOLUME_VIEW_PATH", path)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_restore_without_a_remembered_device_follows_the_system_default(self):
+		self.patch_sound_volume_view()
+		with mock.patch.object(self.app, "set_app_output_device", return_value=True) as set_device:
+			self.app.restore_app_output_device("brave.exe", None)
+		set_device.assert_called_once_with("brave.exe", "DefaultRenderDevice")
+		self.assertIn("跟著系統預設的播放裝置", self.printed_text())
+		self.assertNotIn("沒辦法自動切回", self.printed_text())
+
+	def test_restore_switches_back_to_the_remembered_device(self):
+		self.patch_sound_volume_view()
+		device = "Realtek(R) Audio\\Device\\Realtek HD Audio 2nd output\\Render"
+		with mock.patch.object(self.app, "set_app_output_device", return_value=True) as set_device:
+			self.app.restore_app_output_device("brave.exe", device)
+		set_device.assert_called_once_with("brave.exe", device)
+		self.assertIn(f"已把 brave.exe 的輸出裝置切回「{device}」。", self.printed_text())
+		self.assertNotIn("沒辦法自動切回", self.printed_text())
+
+	def test_restore_failure_asks_to_switch_back_by_hand(self):
+		self.patch_sound_volume_view()
+		with mock.patch.object(self.app, "set_app_output_device", return_value=False):
+			self.app.restore_app_output_device("brave.exe", None)
+		self.assertIn("沒辦法自動切回 brave.exe 的輸出裝置，可能需要自己在音量混音器裡切回來。", self.printed_text())
+		self.assertNotIn("已把", self.printed_text())
+
+	def test_restore_without_sound_volume_view_asks_to_switch_back_by_hand(self):
+		self.patch_sound_volume_view(exists=False)
+		with mock.patch.object(self.app, "set_app_output_device") as set_device:
+			self.app.restore_app_output_device("brave.exe", None)
+		self.assertIn("請自己在 Windows 音量混音器裡把 brave.exe 的輸出裝置從「CABLE Input」改回原本的設定。", self.printed_text())
+		set_device.assert_not_called()
+
+	def test_remember_skips_a_session_left_on_another_cable(self):
+		# 沒有名稱剛好是 CABLE Input 的裝置時，main() 傳進來的只是「CABLE Input」這個字串
+		rows = SOUND_ROWS[:2] + [
+			{"Name": "CABLE In 16ch", "Type": "Device", "Direction": "Render", "Default": "",
+			 "Item ID": "{0.0.0.00000000}.{ddd}", "Command-Line Friendly ID": "VB-Audio Virtual Cable\\Device\\CABLE In 16ch\\Render"},
+			{"Name": "Brave", "Type": "Application", "Direction": "Render", "Default": "", "Device State": "Active",
+			 "Item ID": "{0.0.0.00000000}.{ddd}|\\Device\\HarddiskVolume3\\Program Files\\Brave\\brave.exe%b{0}|1%b42",
+			 "Process Path": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"},
+		]
+		self.assertIsNone(self.app.remember_app_output_device("brave.exe", "CABLE Input", rows))
+
+	def test_remember_without_an_active_session_returns_none(self):
+		cable = "VB-Audio Virtual Cable\\Device\\CABLE Input\\Render"
+		self.assertIsNone(self.app.remember_app_output_device("msedge.exe", cable, SESSION_ROWS))
 
 
 class WorkflowWiringTests(TranslationBackendTestCase):
