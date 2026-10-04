@@ -395,6 +395,42 @@ class WhisperModelConfigTests(TranslationBackendTestCase):
 
 
 class GlossaryFileTests(TranslationBackendTestCase):
+	def test_glossary_hint_skips_values_that_are_not_strings(self):
+		valid = {"陽宮ひな": "羊宮妃那", "HOOOOPE": "HOOOOPE", "鈴木": ""}
+		for value in (["ゆみやひな", "陽宮ひな"], 1, True, {"正確寫法": "こもれびじかん"}, None):
+			with self.subTest(value=value):
+				hint = self.app.glossary_hint({**valid, "こもれびじかん": value})
+				self.assertEqual(hint, self.app.glossary_hint(valid))
+				self.assertIn("- 羊宮妃那（聽寫可能寫成：陽宮ひな）", hint)
+				self.assertIn("- 鈴木\n", hint + "\n")
+				self.assertEqual(self.app.glossary_hint({"こもれびじかん": value}), "")
+		self.assertEqual(self.app.glossary_hint({"": ""}), "")
+
+	def test_load_glossary_skips_and_reports_values_that_are_not_strings(self):
+		valid = {"ようみやひな": "羊宮妃那", "ホープ": "HOOOOPE", "鈴木": ""}
+		invalid = {"羊宮妃那": ["ゆみやひな", "陽宮ひな"], "HOOOOPE": 1, "こもれびじかん": True, "番組": {"正確寫法": "ばんぐみ"}, "田中": None}
+		with tempfile.TemporaryDirectory() as temp_dir:
+			path = Path(temp_dir) / "glossary.json"
+			path.write_text(json.dumps({**valid, **invalid}, ensure_ascii=False, indent=2), encoding="utf-8")
+			with mock.patch.object(self.app, "GLOSSARY_PATH", path):
+				glossary = self.app.load_glossary()
+		self.assertEqual(glossary, valid)
+		lines = self.printed_text().splitlines()
+		for key, value in invalid.items():
+			with self.subTest(key=key):
+				self.assertTrue(any(key in line and json.dumps(value, ensure_ascii=False) in line and '"聽錯寫法": "正確寫法"' in line for line in lines), lines)
+		for key in valid:
+			self.assertNotIn(key, self.printed_text())
+
+	def test_live_caption_still_translates_when_a_glossary_value_is_not_a_string(self):
+		# Worker.run calls translate_with_context with no try around it, so a raise here would
+		# stop the captions for the rest of the session.
+		translator, calls = self.gemini_translator(lambda contents, n: "羊宮妃那來了。")
+		glossary = {"陽宮ひな": "羊宮妃那", "羊宮妃那": ["ゆみやひな", "陽宮ひな"], "HOOOOPE": 1}
+		self.assertEqual(translator.translate_with_context("", "陽宮ひなが来ました。", glossary), "羊宮妃那來了。")
+		self.assertEqual(len(calls), 1)
+		self.assertIn("- 羊宮妃那（聽寫可能寫成：陽宮ひな）", calls[0]["system_instruction"])
+
 	def test_load_glossary_recreates_the_default_file_when_missing(self):
 		# glossary.json is now gitignored (a user's own list should not conflict with git
 		# pull); a fresh clone must still work by falling back to _DEFAULT_GLOSSARY.

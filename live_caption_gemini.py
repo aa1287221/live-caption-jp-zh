@@ -264,10 +264,21 @@ def load_glossary() -> dict:
             data = json.load(f)
         if not isinstance(data, dict):
             raise ValueError("glossary.json 格式應該是一個 {\"日文\": \"中文\"} 物件")
-        return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"讀取 glossary.json 失敗，改用預設內容：{e}")
         return dict(_DEFAULT_GLOSSARY)
+
+    # 右邊不是文字的那一行（例如把幾種聽錯寫法寫成清單）沒辦法用：略過並印出怎麼改，免得以為有生效
+    glossary = {}
+    for heard, correct in data.items():
+        if not isinstance(correct, str):
+            print(
+                f"glossary.json 的 {json.dumps(heard, ensure_ascii=False)}: {json.dumps(correct, ensure_ascii=False)} "
+                "右邊不是文字，這一行已略過（一行只寫一種聽錯寫法，格式是 \"聽錯寫法\": \"正確寫法\"）"
+            )
+            continue
+        glossary[heard] = correct
+    return glossary
 
 
 def glossary_hint(glossary: dict) -> str:
@@ -285,6 +296,9 @@ def glossary_hint(glossary: dict) -> str:
         return ""
     variants: dict[str, list[str]] = {}
     for heard, correct in glossary.items():
+        # 也會收到沒經過 load_glossary 的對照表（例如比較工具 --glossary 直接讀的檔）
+        if not isinstance(correct, str):
+            continue
         correct = (correct or heard or "").strip()
         heard = (heard or "").strip()
         if not correct:
@@ -292,6 +306,8 @@ def glossary_hint(glossary: dict) -> str:
         names = variants.setdefault(correct, [])
         if heard and heard != correct and heard not in names:
             names.append(heard)
+    if not variants:
+        return ""
     lines = []
     for correct in sorted(variants):
         heard = variants[correct]
