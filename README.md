@@ -68,7 +68,7 @@
 | `transcript_YYYYMMDD_HHMMSS.txt` | 即時字幕的原始紀錄（邊看邊寫入） |
 | `transcript_..._polished.md` | 結束後整理成好讀的中日對照版本 |
 | `transcript_..._notebooklm_style.md` | 有按「開始錄製」才會有：用完整錄音重新辨識，並由翻譯模型看過整段上下文、校正後的版本 |
-| `transcript_..._audio.wav` | 錄音暫存檔。整理成功後會自動刪除；有任何一批整理失敗時會保留 |
+| `transcript_..._audio.wav` | 錄音暫存檔。整理成功後會自動刪除；有任何一批整理失敗時會保留，之後可以用 `python live_caption_gemini.py --rebuild transcripts\transcript_..._audio.wav` 重新整理 |
 
 ## 安裝
 

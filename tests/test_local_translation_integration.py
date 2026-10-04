@@ -491,5 +491,225 @@ class WorkflowWiringTests(TranslationBackendTestCase):
 
 
 
+class KeptRecordingCommandTests(TranslationBackendTestCase):
+	"""Every message that keeps the recording must say how to re-process it; the console gives the exact command."""
+
+	def assert_rebuild_command(self, text, wav_path):
+		import re
+
+		match = re.search(r'python "([^"]+)" --rebuild "([^"]+)"', text)
+		self.assertIsNotNone(match, text)
+		script, wav = match.groups()
+		# Absolute paths, so the command works whichever folder it is pasted into.
+		self.assertTrue(os.path.isabs(script) and os.path.isabs(wav), match.group(0))
+		self.assertTrue(os.path.samefile(script, self.app.__file__), script)
+		self.assertTrue(os.path.samefile(wav, wav_path), wav)
+
+	def test_rebuild_command_makes_a_relative_recording_path_absolute(self):
+		relative = Path("transcripts/transcript_20260926_010203_audio.wav")
+		command = self.app._rebuild_command(relative)
+		self.assertTrue(command.endswith(f' --rebuild "{os.path.abspath(relative)}"'), command)
+
+	def test_partial_failure_transcript_gives_the_rebuild_command_without_local_paths(self):
+		translator, _ = self.gemini_translator(lambda contents, n: "" if n <= 3 else f"批次{n}")
+		out_path, wav_path = self.run_reconstruction(translator, [f"日文{i}です。" for i in range(61)])
+		text = out_path.read_text(encoding="utf-8")
+		self.assertIn("--rebuild", text)
+		self.assertIn(wav_path.name, text)
+		# The transcript is meant to be read and shared; absolute paths would expose the user's folder.
+		self.assertNotIn(str(wav_path.parent), text)
+		self.assertNotIn(os.path.abspath(self.app.__file__), text)
+
+	def test_partial_failure_console_message_gives_the_rebuild_command(self):
+		translator, _ = self.gemini_translator(lambda contents, n: "" if n <= 3 else f"批次{n}")
+		_, wav_path = self.run_reconstruction(translator, [f"日文{i}です。" for i in range(61)])
+		self.assert_rebuild_command(self.printed_text(), wav_path)
+
+	def test_empty_translation_console_message_gives_the_rebuild_command(self):
+		translator, _ = self.gemini_translator(lambda contents, n: "")
+		out_path, wav_path = self.run_reconstruction(translator, ["日文です。"])
+		self.assertIsNone(out_path)
+		self.assert_rebuild_command(self.printed_text(), wav_path)
+
+	def test_local_service_died_console_message_gives_the_rebuild_command(self):
+		translator, _ = self.local_translator(lambda system, user: LocalLLMError("連線失敗", retryable=True, kind="connection"))
+		out_path, wav_path = self.run_reconstruction(translator, ["日文です。"])
+		self.assertIsNone(out_path)
+		self.assert_rebuild_command(self.printed_text(), wav_path)
+
+
+
+class SavedRecordingRebuildTests(TranslationBackendTestCase):
+	"""rebuild_saved_recording re-processes a kept recording with the backend main() would pick."""
+
+	def saved_recording(self, name="transcript_20260926_010203_audio.wav", title="節目", settings=None):
+		temp_dir = tempfile.TemporaryDirectory()
+		self.addCleanup(temp_dir.cleanup)
+		folder = Path(temp_dir.name)
+		wav_path = folder / name
+		wav_path.write_bytes(b"RIFF")
+		if title is not None:
+			(folder / "transcript_20260926_010203.txt").write_text(f"#TITLE: {title}\n\n", encoding="utf-8")
+		settings_path = folder / "last_settings.json"
+		if settings is not None:
+			settings_path.write_text(json.dumps(settings), encoding="utf-8")
+		patcher = mock.patch.object(self.app, "SETTINGS_PATH", settings_path)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		return wav_path
+
+	def rebuild_saved(self, wav_path, translator_error=None, whisper_error=None, rebuild_error=None):
+		"""Run rebuild_saved_recording with the models and the rebuild step itself mocked out."""
+		with mock.patch.object(self.app, "Translator", side_effect=translator_error) as translator_class, \
+				mock.patch.object(self.app, "WhisperModel", side_effect=whisper_error) as whisper_class, \
+				mock.patch.object(self.app, "load_glossary", return_value={"田中": "田中"}), \
+				mock.patch.object(
+					self.app, "rebuild_transcript_from_full_audio", return_value=Path("out.md"), side_effect=rebuild_error
+				) as rebuild:
+			result = self.app.rebuild_saved_recording(wav_path)
+		return result, translator_class, whisper_class, rebuild
+
+	def test_rebuild_uses_the_backend_main_would_pick_the_glossary_and_the_episode_title(self):
+		cases = (
+			({"TRANSLATION_BACKEND": "local"}, {"translation_backend": "gemini"}, "local"),
+			({}, {"translation_backend": "local"}, "local"),
+			({}, None, "gemini"),
+			({"TRANSLATION_BACKEND": "ollama"}, {"translation_backend": "local"}, "gemini"),
+		)
+		for env, settings, expected in cases:
+			with self.subTest(env=env, settings=settings), mock.patch.dict(os.environ, env):
+				wav_path = self.saved_recording(settings=settings)
+				result, translator_class, whisper_class, rebuild = self.rebuild_saved(wav_path)
+				self.assertEqual(result, Path("out.md"))
+				translator_class.assert_called_once_with(expected)
+				whisper_class.assert_called_once_with(
+					self.app.WHISPER_MODEL_SIZE, device=self.app.WHISPER_DEVICE, compute_type=self.app.WHISPER_COMPUTE_TYPE
+				)
+				rebuild.assert_called_once_with(
+					wav_path, whisper_class.return_value, translator_class.return_value, {"田中": "田中"}, "節目"
+				)
+		self.assertIn("改用 Gemini API", self.printed_text())
+
+	def test_rebuild_without_the_raw_transcript_has_no_episode_title(self):
+		_, _, _, rebuild = self.rebuild_saved(self.saved_recording(title=None))
+		self.assertEqual(rebuild.call_args.args[4], "")
+
+	def test_unreadable_raw_transcript_still_rebuilds_without_an_episode_title(self):
+		wav_path = self.saved_recording(title=None)
+		# Re-saved as Big5 (Notepad's ANSI on a Taiwanese Windows), so it is not valid UTF-8.
+		wav_path.with_name("transcript_20260926_010203.txt").write_bytes("#TITLE: 節目\n\n".encode("big5"))
+		result, translator_class, whisper_class, rebuild = self.rebuild_saved(wav_path)
+		self.assertEqual(result, Path("out.md"))
+		rebuild.assert_called_once_with(
+			wav_path, whisper_class.return_value, translator_class.return_value, {"田中": "田中"}, ""
+		)
+		self.assertRegex(self.printed_text(), r"讀取 transcript_20260926_010203\.txt 的節目名稱失敗，改用預設標題：.*can't decode")
+		self.assertNotIn("用完整錄音重新整理逐字稿時發生錯誤", self.printed_text())
+
+	def test_success_prints_where_the_new_transcript_is(self):
+		result, _, _, _ = self.rebuild_saved(self.saved_recording())
+		self.assertEqual(result, Path("out.md"))
+		self.assertIn("已產生用完整錄音重新辨識、準確度更好的逐字稿：out.md", self.printed_text())
+
+	def test_rebuild_error_returns_none_and_prints_the_command_to_try_again(self):
+		wav_path = self.saved_recording()
+		error = RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+		result, _, _, _ = self.rebuild_saved(wav_path, rebuild_error=error)
+		self.assertIsNone(result)
+		self.assertIn("用完整錄音重新整理逐字稿時發生錯誤：Library cublas64_12.dll is not found", self.printed_text())
+		self.assertIn(f"之後可以用這行指令重新處理：{self.app._rebuild_command(wav_path)}", self.printed_text())
+		self.assertTrue(wav_path.exists())
+
+	def test_whisper_load_error_returns_none_and_prints_the_command_to_try_again(self):
+		wav_path = self.saved_recording()
+		error = RuntimeError("CUDA failed with error no CUDA-capable device is detected")
+		result, translator_class, whisper_class, rebuild = self.rebuild_saved(wav_path, whisper_error=error)
+		self.assertIsNone(result)
+		# Built before the slow Whisper load, so a bad API key is reported without waiting for the model.
+		translator_class.assert_called_once()
+		whisper_class.assert_called_once()
+		rebuild.assert_not_called()
+		self.assertIn("用完整錄音重新整理逐字稿時發生錯誤：CUDA failed with error no CUDA-capable device", self.printed_text())
+		self.assertIn(f"之後可以用這行指令重新處理：{self.app._rebuild_command(wav_path)}", self.printed_text())
+		self.assertTrue(wav_path.exists())
+
+	def test_rebuild_error_after_the_recording_was_deleted_does_not_print_the_command(self):
+		wav_path = self.saved_recording()
+
+		def delete_then_fail(wav, *_):
+			wav.unlink()
+			raise RuntimeError("整理到一半發生錯誤")
+
+		result, _, _, _ = self.rebuild_saved(wav_path, rebuild_error=delete_then_fail)
+		self.assertIsNone(result)
+		self.assertFalse(wav_path.exists())
+		self.assertIn("用完整錄音重新整理逐字稿時發生錯誤：整理到一半發生錯誤", self.printed_text())
+		# The recording is gone, so the command could only answer 找不到錄音檔.
+		self.assertNotIn("之後可以用這行指令重新處理", self.printed_text())
+
+	def test_missing_recording_returns_none_before_loading_any_model(self):
+		temp_dir = tempfile.TemporaryDirectory()
+		self.addCleanup(temp_dir.cleanup)
+		missing = Path(temp_dir.name) / "transcript_20260926_010203_audio.wav"
+		result, translator_class, whisper_class, rebuild = self.rebuild_saved(missing)
+		self.assertIsNone(result)
+		translator_class.assert_not_called()
+		whisper_class.assert_not_called()
+		rebuild.assert_not_called()
+		self.assertIn(str(missing), self.printed_text())
+
+	def test_audio_the_app_did_not_keep_is_refused_before_loading_any_model(self):
+		# A successful rebuild deletes its input, so it must only ever touch the app's own recordings.
+		for name in ("podcast.wav", "podcast_audio.wav", "transcript_20260926_010203_notebooklm_style.md"):
+			with self.subTest(name=name):
+				other = self.saved_recording(name=name)
+				result, translator_class, whisper_class, rebuild = self.rebuild_saved(other)
+				self.assertIsNone(result)
+				translator_class.assert_not_called()
+				whisper_class.assert_not_called()
+				rebuild.assert_not_called()
+				self.assertEqual(other.read_bytes(), b"RIFF")
+				self.assertIn(str(other), self.printed_text())
+
+	def test_translator_failure_returns_none_before_loading_whisper(self):
+		error = RuntimeError("找不到 Gemini API 金鑰")
+		result, _, whisper_class, rebuild = self.rebuild_saved(self.saved_recording(), translator_error=error)
+		self.assertIsNone(result)
+		whisper_class.assert_not_called()
+		rebuild.assert_not_called()
+		self.assertIn("翻譯引擎初始化失敗：找不到 Gemini API 金鑰", self.printed_text())
+
+
+
+class RebuildCommandLineTests(TranslationBackendTestCase):
+	def test_no_arguments_open_the_app_as_before(self):
+		with mock.patch.object(self.app, "main") as main, \
+				mock.patch.object(self.app, "rebuild_saved_recording") as rebuild:
+			self.assertEqual(self.app._run_cli([]), 0)
+		main.assert_called_once_with()
+		rebuild.assert_not_called()
+
+	def test_rebuild_exit_code_says_whether_a_transcript_was_produced(self):
+		wav = "transcript_20260926_010203_audio.wav"
+		for produced, expected in ((Path("transcript_20260926_010203_notebooklm_style.md"), 0), (None, 1)):
+			with self.subTest(produced=produced):
+				with mock.patch.object(self.app, "main") as main, \
+						mock.patch.object(self.app, "rebuild_saved_recording", return_value=produced) as rebuild:
+					self.assertEqual(self.app._run_cli(["--rebuild", wav]), expected)
+				rebuild.assert_called_once_with(Path(wav))
+				main.assert_not_called()
+
+	def test_other_arguments_print_usage_and_exit_2(self):
+		for argv in (["--help"], ["--rebuild"], ["transcript_20260926_010203_audio.wav"], ["--rebuild", "a.wav", "b.wav"]):
+			with self.subTest(argv=argv):
+				with mock.patch.object(self.app, "main") as main, \
+						mock.patch.object(self.app, "rebuild_saved_recording") as rebuild:
+					self.assertEqual(self.app._run_cli(argv), 2)
+				main.assert_not_called()
+				rebuild.assert_not_called()
+		self.assertIn("--rebuild", self.printed_text())
+
+
+
 if __name__ == "__main__":
 	unittest.main()

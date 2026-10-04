@@ -503,6 +503,11 @@ def _polish_with_local_model(
 	)
 
 
+def _rebuild_command(wav_path: "Path") -> str:
+    """之後重新整理這份錄音要執行的指令；用絕對路徑，在哪個資料夾貼上執行都可以。"""
+    return f'python "{os.path.abspath(__file__)}" --rebuild "{os.path.abspath(wav_path)}"'
+
+
 def rebuild_transcript_from_full_audio(
     wav_path: "Path",
     asr_model: "WhisperModel",
@@ -557,12 +562,14 @@ def rebuild_transcript_from_full_audio(
         if polished_parts is None:
             # 服務中途停掉：保留完整錄音，之後可以重新處理
             print(f"本機模型服務無法使用，已保留完整錄音：{wav_path}")
+            print(f"之後可以用這行指令重新處理：{_rebuild_command(wav_path)}")
             return None
     else:
         polished_parts, failed_batches = _polish_with_gemini(translator, ja_lines, system_prompt)
 
     if not polished_parts:
         print(f"翻譯模型沒有回傳任何內容，略過這份整理稿，已保留完整錄音：{wav_path}")
+        print(f"之後可以用這行指令重新處理：{_rebuild_command(wav_path)}")
         return None
 
     if translation_only:
@@ -576,9 +583,10 @@ def rebuild_transcript_from_full_audio(
             "準確度會比即時觀看時看到的字幕更好，內容照實呈現、沒有自己刪減。"
         )
     if failed_batches:
+        # 整理稿是拿來讀、分享的，不放絕對路徑（裡面有 Windows 使用者資料夾名稱）
         summary += (
             f"\n\n⚠️ 有 {failed_batches} 批整理失敗（可能撞到額度限制），這份整理稿有缺漏；"
-            f"完整錄音已保留在 {wav_path.name}，可以之後重新處理。"
+            f"完整錄音已保留在 {wav_path.name}，可以之後重新處理：`python live_caption_gemini.py --rebuild <這個錄音檔的路徑>`"
         )
     out_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + "_notebooklm_style.md")
     header = [
@@ -598,6 +606,7 @@ def rebuild_transcript_from_full_audio(
     # 不然缺漏的那幾批內容就永遠找不回來了
     if failed_batches:
         print(f"有 {failed_batches} 批整理失敗，已保留完整錄音：{wav_path}")
+        print(f"之後可以用這行指令重新處理：{_rebuild_command(wav_path)}")
         return out_path
     try:
         wav_path.unlink()
@@ -2235,11 +2244,81 @@ def main():
             except Exception as e:
                 notebooklm_style_path = None
                 print(f"用完整錄音重新整理逐字稿時發生錯誤（不影響前面已經產生的逐字稿）：{e}")
+                if raw_audio_path.exists():
+                    print(f"之後可以用這行指令重新處理：{_rebuild_command(raw_audio_path)}")
 
             if notebooklm_style_path:
                 print(f"已產生用完整錄音重新辨識、準確度更好的逐字稿：{notebooklm_style_path}")
 
 
+def rebuild_saved_recording(wav_path: Path) -> "Path | None":
+    """重新整理之前保留下來的完整錄音（額度用完、本機模型服務停掉時會保留）。"""
+    if not wav_path.exists():
+        print(f"找不到錄音檔：{wav_path}")
+        return None
+    if not (wav_path.name.startswith("transcript_") and wav_path.name.endswith("_audio.wav")):
+        print(f"--rebuild 只能用在本程式保留下來的 transcript_..._audio.wav（整理成功後會把它刪除）：{wav_path}")
+        return None
+
+    from startup_gui import load_last_settings
+
+    # 翻譯引擎跟 main() 一樣：環境變數 TRANSLATION_BACKEND 優先，其次是上次的選擇，都沒有就用 Gemini
+    last = load_last_settings(SETTINGS_PATH)
+    try:
+        backend = resolve_translation_backend(
+            os.environ.get("TRANSLATION_BACKEND") or last.get("translation_backend")
+        )
+    except RuntimeError as e:
+        print(f"{e}，改用 Gemini API。")
+        backend = TRANSLATION_BACKEND_GEMINI
+    try:
+        translator = Translator(backend)
+    except RuntimeError as e:
+        print(f"翻譯引擎初始化失敗：{e}")
+        return None
+
+    try:
+        print("載入語音辨識模型（Whisper，第一次執行會自動下載）...")
+        asr = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+        glossary = load_glossary()
+
+        # 節目名稱沿用同一場的原始逐字稿第一行（#TITLE:），重新整理後的標題才會跟原本一樣
+        raw_log_path = wav_path.with_name(wav_path.stem.replace("_audio", "") + ".txt")
+        episode_title = ""
+        if raw_log_path.exists():
+            # 節目名稱只是附帶資訊，讀不到（例如被另存成其他編碼）也照樣重新整理
+            try:
+                with open(raw_log_path, "r", encoding="utf-8") as f:
+                    title_m = _TITLE_LINE_RE.match(f.readline().rstrip("\n"))
+                episode_title = title_m.group(1).strip() if title_m else ""
+            except (OSError, UnicodeError) as e:
+                print(f"讀取 {raw_log_path.name} 的節目名稱失敗，改用預設標題：{e}")
+
+        out_path = rebuild_transcript_from_full_audio(wav_path, asr, translator, glossary, episode_title)
+    except Exception as e:
+        print(f"用完整錄音重新整理逐字稿時發生錯誤：{e}")
+        if wav_path.exists():
+            print(f"之後可以用這行指令重新處理：{_rebuild_command(wav_path)}")
+        return None
+
+    if out_path:
+        print(f"已產生用完整錄音重新辨識、準確度更好的逐字稿：{out_path}")
+    return out_path
+
+
+def _run_cli(argv: list[str]) -> int:
+    """沒有參數就照常開啟字幕程式；--rebuild <錄音檔> 重新整理之前保留下來的完整錄音。"""
+    if not argv:
+        main()
+        return 0
+    if len(argv) == 2 and argv[0] == "--rebuild":
+        return 0 if rebuild_saved_recording(Path(argv[1])) else 1
+    print("用法：python live_caption_gemini.py [--rebuild transcripts\\transcript_..._audio.wav]")
+    return 2
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()  # 打包成 exe 的情況下保護用，一般直接跑 python 也不影響
-    main()
+    exit_code = _run_cli(sys.argv[1:])
+    if exit_code:
+        sys.exit(exit_code)
