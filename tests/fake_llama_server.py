@@ -3,7 +3,7 @@
 Env vars (never argv, so ``ManagedLlamaServer.command`` stays exactly what production
 builds and can be asserted on directly):
   FAKE_EXIT_CODE     if set, exit immediately with this code (never binds a port)
-  FAKE_EXIT_MESSAGE  printed to stdout before exiting, for log-tail assertions
+  FAKE_EXIT_MESSAGE  printed to stdout in UTF-8 before exiting, for log-tail assertions
   FAKE_HEALTH_503_COUNT  number of /health polls to answer 503 (loading) before 200
 """
 
@@ -14,6 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def main() -> None:
+	# Log UTF-8 like the real llama-server; redirected to a file, Python's stdout would
+	# otherwise use the locale encoding (cp950 on Traditional Chinese Windows).
+	sys.stdout.reconfigure(encoding="utf-8")
+	sys.stderr.reconfigure(encoding="utf-8")
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--host", default="127.0.0.1")
 	parser.add_argument("--port", type=int, required=True)

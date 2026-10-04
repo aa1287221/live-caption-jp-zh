@@ -185,7 +185,8 @@ class RealSpawnTests(LlamaServerTestCase):
 	def test_row6_child_exit_before_ready_fails_fast_with_exit_code_and_log_tail(self):
 		port = free_port()
 		config = self.make_config(port, startup_wait=120.0)  # a large budget the failure must beat
-		with mock.patch.dict(os.environ, {"FAKE_EXIT_CODE": "7", "FAKE_EXIT_MESSAGE": "設定檔壞掉了"}):
+		# A cp950 child stdout reproduces a Traditional Chinese Windows locale on any OS.
+		with mock.patch.dict(os.environ, {"FAKE_EXIT_CODE": "7", "FAKE_EXIT_MESSAGE": "設定檔壞掉了", "PYTHONIOENCODING": "cp950"}):
 			started = time.monotonic()
 			with self.assertRaises(LlamaServerError) as caught:
 				self.ensure(config)
